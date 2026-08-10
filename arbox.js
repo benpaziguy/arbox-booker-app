@@ -84,12 +84,17 @@ function showSignedIn(yes) {
   $("#tools").classList.toggle("hidden", !yes);
   $("#refresh").classList.toggle("hidden", !yes);
   $("#signout").classList.toggle("hidden", !yes);
+  $("#queued-btn").classList.toggle("hidden", !yes);
 }
 
 function signOut() {
   token = "";
   membershipId = null;
   sessionStorage.removeItem(TOKEN_KEY);
+  // The GitHub token deliberately survives: it is per-phone setup, not part of the
+  // gym session, and re-pasting it on every sign-in would make queueing unusable.
+  // "Forget" in Queue settings is how you remove it.
+  $("#queue-view").classList.add("hidden");
   showSignedIn(false);
 }
 
@@ -238,13 +243,64 @@ async function cancel(cls) {
   toast(`Cancelled ${cls.name} at ${cls.start}.`, "ok");
 }
 
+// Which classes have a pending request, so a card can show "Queued" rather than
+// offering to queue it twice. Keyed by date+time+name, matching the duplicate rule
+// in scheduler.queue_once.
+const queuedIds = new Set();
+
+function queueKey(cls) {
+  return `${cls.date}|${cls.start}|${cls.name.toLowerCase()}`;
+}
+
+async function refreshQueued({ quiet = true } = {}) {
+  if (!queueConfigured()) {
+    queuedIds.clear();
+    return;
+  }
+  try {
+    const rows = await listQueued();
+    queuedIds.clear();
+    for (const r of rows) {
+      queuedIds.add(`${r.date}|${String(r.time || "").slice(0, 5)}|${String(r.class_name || "").toLowerCase()}`);
+    }
+  } catch (err) {
+    // A bad token must not stop the schedule rendering -- booking still works
+    // without queueing, and the error surfaces when they actually tap Queue.
+    queuedIds.clear();
+    if (!quiet) toast(err.message, "bad");
+  }
+}
+
 async function act(cls, kind, button) {
   const original = button.textContent;
   button.disabled = true;
   button.textContent = "…";
   try {
-    if (kind === "cancel") await cancel(cls);
-    else await book(cls, kind === "waitlist");
+    if (kind === "cancel") {
+      await cancel(cls);
+    } else if (kind === "queue") {
+      if (!queueConfigured()) {
+        showQueue();
+        $("#queue-setup").open = true;
+        throw new Error("Add a GitHub token first — this is a one-time setup.");
+      }
+      const entry = await queueClass(cls, true);
+      queuedIds.add(queueKey(cls));
+      const when = cls.opensAt.toLocaleString([], {
+        weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+      });
+      toast(`Queued ${cls.name} — claimed automatically at ${when}. (${entry.id})`, "ok");
+    } else if (kind === "unqueue") {
+      const rows = await listQueued();
+      const match = rows.find((r) =>
+        r.date === cls.date && String(r.time || "").slice(0, 5) === cls.start &&
+        String(r.class_name || "").toLowerCase() === cls.name.toLowerCase());
+      if (match) await unqueueId(match.id);
+      queuedIds.delete(queueKey(cls));
+      toast(`No longer queued: ${cls.name} at ${cls.start}.`, "ok");
+    } else {
+      await book(cls, kind === "waitlist");
+    }
     await loadSchedule();
   } catch (err) {
     // 425 means the window is not open yet; Arbox's own wording is clearer here.
@@ -294,10 +350,18 @@ function card(cls) {
     btn.textContent = "waiting";
     btn.disabled = true;
   } else if (!open) {
-    // Tapping now would be refused with a 425, so say so instead.
-    btn.className = "btn ghost";
-    btn.textContent = "Too early";
-    btn.disabled = true;
+    // Booking now would be refused with a 425. Queue it instead: the request is
+    // written to the repo and claimed by GitHub Actions when the window opens.
+    // This is the only thing here the gym's own site cannot do.
+    if (queuedIds.has(queueKey(cls))) {
+      btn.className = "btn ghost";
+      btn.textContent = "Queued";
+      btn.onclick = () => act(cls, "unqueue", btn);
+    } else {
+      btn.className = "btn warnish";
+      btn.textContent = "Queue";
+      btn.onclick = () => act(cls, "queue", btn);
+    }
   } else if (cls.isFull) {
     btn.className = "btn ghost";
     btn.textContent = "Waitlist";
@@ -347,6 +411,112 @@ function render() {
   }
 }
 
+// ---------------------------------------------------------------- queue view
+
+function showQueue() {
+  $("#main").classList.add("hidden");
+  $("#queue-view").classList.remove("hidden");
+  $("#gh-repo").value = ghRepo;
+  renderQueue();
+}
+
+function hideQueue() {
+  $("#queue-view").classList.add("hidden");
+  $("#main").classList.remove("hidden");
+}
+
+async function renderQueue() {
+  const host = $("#queue-list");
+  host.textContent = "";
+
+  if (!queueConfigured()) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "Queueing is not set up yet — open Queue settings below.";
+    host.append(p);
+    $("#queue-setup").open = true;
+    return;
+  }
+
+  let rows;
+  try {
+    rows = await listQueued();
+  } catch (err) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = err.message;
+    host.append(p);
+    return;
+  }
+
+  const today = ymd(new Date());
+  // A past request is inert rather than wrong -- it matches no class, so the
+  // scheduler ignores it. Hiding it keeps this list about what will happen.
+  const pending = rows.filter((r) => String(r.date) >= today);
+  if (!pending.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "Nothing queued. Tap Queue on a class that is not open yet.";
+    host.append(p);
+    return;
+  }
+
+  for (const r of pending) {
+    const el = document.createElement("div");
+    el.className = "card";
+
+    const time = document.createElement("div");
+    time.className = "time";
+    time.textContent = String(r.time || "").slice(0, 5);
+
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = r.class_name;
+    const sub = document.createElement("div");
+    sub.className = "sub";
+
+    // Cross-check against the live schedule, so a stale or misspelled request is
+    // visible here instead of silently booking nothing.
+    const live = classes.find((c) =>
+      c.date === r.date && c.start === String(r.time || "").slice(0, 5) &&
+      c.name.toLowerCase() === String(r.class_name || "").toLowerCase());
+    const d = new Date(r.date + "T00:00:00");
+    let state = `${DAYS[(d.getDay() + 6) % 7].slice(0, 3)} ${d.getDate()}/${d.getMonth() + 1}`;
+    if (!live) state += " · not in the schedule";
+    else if (live.bookedByMe) state += " · booked ✓";
+    else if (live.inStandby) state += " · on the waiting list";
+    else if (live.opensAt <= new Date()) state += " · window open, books on the next run";
+    else state += ` · opens ${live.opensAt.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}`;
+    if (r.enabled === false) state += " · paused";
+    sub.textContent = state;
+    meta.append(name, sub);
+
+    const btn = document.createElement("button");
+    btn.className = "btn danger small";
+    btn.textContent = "Remove";
+    btn.onclick = async () => {
+      btn.disabled = true;
+      btn.textContent = "…";
+      try {
+        await unqueueId(r.id);
+        if (live) queuedIds.delete(queueKey(live));
+        toast(`Removed ${r.class_name} on ${r.date}.`, "ok");
+        await renderQueue();
+        render();
+      } catch (err) {
+        toast(err.message, "bad");
+        btn.disabled = false;
+        btn.textContent = "Remove";
+      }
+    };
+
+    el.append(time, meta, btn);
+    host.append(el);
+  }
+}
+
 function toast(message, kind) {
   const el = $("#toast");
   el.textContent = message;
@@ -361,6 +531,10 @@ async function start() {
   showSignedIn(true);
   try {
     await loadSchedule();
+    // Queued state before membership: it changes what every card shows, and a
+    // membership problem should not leave the buttons wrong.
+    await refreshQueued();
+    render();
     await resolveMembership();
   } catch (err) {
     toast(err.message, "bad");
@@ -389,8 +563,47 @@ $("#signin").onclick = async () => {
 $("#password").addEventListener("keydown", (e) => { if (e.key === "Enter") $("#signin").click(); });
 $("#filter").addEventListener("input", render);
 $("#mine-only").addEventListener("change", render);
-$("#refresh").onclick = () => loadSchedule().catch((e) => toast(e.message, "bad"));
+$("#refresh").onclick = () =>
+  loadSchedule().then(() => refreshQueued()).then(render).catch((e) => toast(e.message, "bad"));
 $("#signout").onclick = signOut;
+
+$("#queued-btn").onclick = () => {
+  if ($("#queue-view").classList.contains("hidden")) showQueue(); else hideQueue();
+};
+$("#queue-back").onclick = hideQueue;
+
+$("#gh-save").onclick = async () => {
+  const repo = $("#gh-repo").value.trim();
+  const tok = $("#gh-token").value.trim();
+  if (!repo || !tok) return toast("Give both the repository and a token.", "bad");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo.replace(/^https?:\/\/github\.com\//, ""))) {
+    return toast("Repository should look like you/arbox-booker.", "bad");
+  }
+  saveQueueConfig(repo, tok);
+  // Prove it works now rather than at 03:00: read the file back before claiming
+  // the setup is done.
+  try {
+    await listQueued();
+  } catch (err) {
+    return toast(err.message, "bad");
+  }
+  $("#gh-token").value = "";
+  $("#queue-setup").open = false;
+  toast("Queueing is set up on this phone.", "ok");
+  await refreshQueued({ quiet: false });
+  await renderQueue();
+  render();
+};
+
+$("#gh-forget").onclick = () => {
+  forgetQueueConfig();
+  $("#gh-repo").value = "";
+  $("#gh-token").value = "";
+  queuedIds.clear();
+  toast("Token removed from this phone.", "ok");
+  renderQueue();
+  render();
+};
 
 $("#email").value = localStorage.getItem("arbox-email") || "";
 

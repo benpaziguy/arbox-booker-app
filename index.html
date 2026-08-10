@@ -68,8 +68,11 @@
   .empty { color:var(--dim); font-size:14px; padding:24px 2px; }
   .note { font-size:12.5px; color:var(--dim); line-height:1.5; margin-top:14px; }
   #gate { max-width:420px; margin:0 auto; padding:8px 0; }
-  #gate label { display:block; font-size:13px; color:var(--dim); margin:14px 0 5px; }
+  #gate label, #queue-setup label { display:block; font-size:13px; color:var(--dim); margin:14px 0 5px; }
   code { background:#0d1016; padding:1px 5px; border-radius:4px; font-size:12px; }
+  #queue-setup { margin-top:22px; border-top:1px solid var(--line); padding-top:12px; }
+  #queue-setup summary { font-size:13px; color:var(--dim); cursor:pointer; }
+  .btn.warnish { background:var(--warn); color:#231600; }
 </style>
 </head>
 <body>
@@ -77,6 +80,7 @@
 <header>
   <div class="bar">
     <h1>Arbox booker</h1>
+    <button class="btn ghost small" id="queued-btn">Queue</button>
     <button class="btn ghost small" id="refresh">Refresh</button>
     <button class="btn ghost small" id="signout">Sign out</button>
   </div>
@@ -108,15 +112,48 @@
   <section id="main" class="hidden">
     <div id="list"></div>
     <p class="note">
-      Registration opens 48h before most classes, 72h for Sunday and Monday, so
-      classes further out show <em>Too early</em>. Your recurring slots
-      (<code>schedule.json</code>) are booked automatically by GitHub Actions the
-      moment their window opens — you do not need this page for those.
+      Registration opens 48h before most classes, 72h for Sunday and Monday. A class
+      further out shows <strong>Queue</strong>: tap it and GitHub Actions claims the
+      seat the second its window opens, days later, with nothing of yours running.
+      Your recurring weekly slots are already handled the same way.
     </p>
+  </section>
+
+  <!-- Queue panel: the list of pending requests, and the one-time setup. -->
+  <section id="queue-view" class="hidden">
+    <div class="bar" style="margin-bottom:6px">
+      <h1 style="font-size:16px">Queued classes</h1>
+      <button class="btn ghost small" id="queue-back">Done</button>
+    </div>
+    <div id="queue-list"></div>
+
+    <details id="queue-setup">
+      <summary>Queue settings</summary>
+      <label for="gh-repo">Repository</label>
+      <input id="gh-repo" type="text" placeholder="you/arbox-booker"
+             autocapitalize="none" spellcheck="false">
+      <label for="gh-token">GitHub token</label>
+      <input id="gh-token" type="password" placeholder="github_pat_..."
+             autocapitalize="none" spellcheck="false">
+      <div class="tools">
+        <button class="btn small" id="gh-save">Save</button>
+        <button class="btn ghost small" id="gh-forget">Forget</button>
+      </div>
+      <p class="note">
+        Queueing writes the request into <code>schedule.json</code> in your private
+        repo, because something has to act at 03:00 and it cannot be a phone
+        browser. That needs a token: GitHub → Settings → Developer settings →
+        <em>Fine-grained tokens</em>, only this repository, <strong>Contents:
+        read and write</strong>, nothing else. It is stored on this phone only.
+        Scope it to the one repo so a lost phone cannot reach anything else.
+      </p>
+    </details>
   </section>
 </main>
 
 <div id="toast" class="toast hidden"></div>
+<!-- queue.js first: arbox.js calls into it when rendering a not-yet-open class. -->
+<script src="queue.js"></script>
 <script src="arbox.js"></script>
 </body>
 </html>
