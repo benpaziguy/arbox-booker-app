@@ -49,16 +49,26 @@ async function call(path, { method = "GET", body = null, auth = true } = {}) {
   let data = null;
   try { data = await res.json(); } catch { /* some endpoints return empty */ }
 
-  if (res.status === 401 || res.status === 403) {
+  // Only 401 means the session is gone. Arbox also answers 403 for decisions that
+  // have nothing to do with authentication -- "You cannot cancel a booking for a
+  // user outside your group", and its cancellation-policy refusals. Treating those
+  // as an expired session signed you out and hid the real reason, which is how
+  // "Leave queue" came to report "Session expired. Sign in again." on a perfectly
+  // valid token.
+  if (res.status === 401) {
     signOut();
     throw new Error("Session expired. Sign in again.");
   }
   if (!res.ok) {
-    // 425 is Arbox's "too early", and its message is the useful part.
-    const msg = data?.message || data?.error || `HTTP ${res.status}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
+    // Arbox nests the useful sentence: {error: {messageToUser, message}}. Reading
+    // data.error directly yields "[object Object]", so prefer messageToUser --
+    // it is the wording the gym's own site shows.
+    const err = data?.error;
+    const msg = (typeof err === "string" ? err : null) ||
+      err?.messageToUser || err?.message || data?.message || `HTTP ${res.status}`;
+    const out = new Error(msg);
+    out.status = res.status;
+    throw out;
   }
   return data;
 }
@@ -225,20 +235,38 @@ async function cancel(cls) {
       body: { schedule_id: cls.id },
     });
     late = !!(check?.data?.late_cancel ?? check?.late_cancel);
-  } catch {
-    // Non-fatal: fall through with late_cancel false, exactly as the portal does.
+  } catch (err) {
+    // Advisory call, so a failure here is non-fatal: fall through with
+    // late_cancel false, exactly as the portal does. A 401 is the exception --
+    // call() has already signed us out, and pressing on would send a tokenless
+    // delete whose 401 reads as if the cancellation itself was rejected.
+    if (err.status === 401 || /Session expired/.test(err.message)) throw err;
   }
 
-  await call("/scheduleUser/delete", {
-    method: "POST",
-    body: { schedule_user_id: cls.scheduleUserId, schedule_id: cls.id, late_cancel: late },
-  });
+  const leaving = cls.inStandby && !cls.bookedByMe;
+  try {
+    await call("/scheduleUser/delete", {
+      method: "POST",
+      body: { schedule_user_id: cls.scheduleUserId, schedule_id: cls.id, late_cancel: late },
+    });
+  } catch (err) {
+    // Say which action failed and let Arbox's own sentence stand. A 403 here is a
+    // policy decision -- too late to cancel, or a booking the account may not
+    // touch -- not a broken session, so the wording must not send you to sign in.
+    if (err.status === 403) {
+      throw new Error(`${leaving ? "Could not leave the waiting list" : "Could not cancel"}: ` +
+        `${err.message} (Arbox refused it, your session is fine.)`);
+    }
+    throw err;
+  }
 
   // The 200 above is necessary but not sufficient, so confirm from the server.
   await loadSchedule();
   const still = classes.find((c) => c.id === cls.id);
   if (still && (still.bookedByMe || still.inStandby)) {
-    throw new Error("Arbox accepted the request but the booking is still there.");
+    throw new Error(leaving
+      ? "Arbox accepted the request but you are still on the waiting list."
+      : "Arbox accepted the request but the booking is still there.");
   }
 
   // Cancelling is not enough on its own. If a recurring rule wants this slot, the
@@ -277,7 +305,8 @@ async function cancel(cls) {
     note += ` Warning: a queued request for it may remain (${err.message}).`;
   }
 
-  toast(`Cancelled ${cls.name} at ${cls.start}.${note}`, "ok");
+  toast(`${leaving ? "Left the waiting list for" : "Cancelled"} ${cls.name} ` +
+        `at ${cls.start}.${note}`, "ok");
 }
 
 // Which classes have a pending request, so a card can show "Queued" rather than
