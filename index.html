@@ -51,6 +51,10 @@
   .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--dim); }
   .btn.danger { background:transparent; border:1px solid var(--bad); color:var(--bad); }
   .btn.small { padding:7px 10px; font-size:12.5px; }
+  /* A class can offer two independent choices -- take a place, and let the weekly
+     rule have this date -- so the card holds a stack rather than one button. */
+  .actions { display:flex; flex-direction:column; gap:6px; align-items:stretch; }
+  .actions .btn { width:100%; }
   .booked .time, .booked .name { color:var(--ok); }
   .full .sub { color:var(--warn); }
   label.check { display:flex; align-items:center; gap:7px; font-size:13px; color:var(--dim); }

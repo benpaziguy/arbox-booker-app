@@ -477,11 +477,28 @@ function card(cls) {
   // this the page cannot explain why a class you never tapped is booked, or why
   // one you cancelled came back.
   const { rule, skipped } = ruleFor(cls);
-  if (rule) detail += skipped ? " · skipping this week" : " · weekly";
+  const held = cls.bookedByMe || cls.inStandby;
+  // Say when a weekly rule owns this slot. The skip state is only worth mentioning
+  // while the seat is not yours: once you hold it, the skip governs nothing you can
+  // see -- it only stops the automation re-claiming the slot if you cancel.
+  if (rule) detail += held ? " · weekly" : (skipped ? " · weekly, skipping" : " · weekly");
   sub.textContent = detail;
   meta.append(name, sub);
 
+  // Two independent questions, so two buttons rather than one ranked list.
+  //
+  //   1. do I have a place in this class, and do I want one?      -> primary
+  //   2. should the weekly rule claim this date?                  -> secondary
+  //
+  // These used to share a single button, ranked with the rule first, which meant a
+  // class a rule owned could never be booked by hand: the card offered only Skip or
+  // Skipped. That is wrong in the ordinary case -- deciding to go tonight after all
+  // is not the same as changing what the automation does every Tuesday.
+  const actions = document.createElement("div");
+  actions.className = "actions";
+
   const btn = document.createElement("button");
+  let primary = true;
   if (cls.bookedByMe) {
     btn.className = "btn danger";
     btn.textContent = "Cancel";
@@ -493,44 +510,53 @@ function card(cls) {
     btn.className = "btn danger";
     btn.textContent = "Leave queue";
     btn.onclick = () => act(cls, "cancel", btn);
+  } else if (open) {
+    // The window is open, so this is bookable right now whatever the rules say.
+    if (cls.isFull) {
+      btn.className = "btn ghost";
+      btn.textContent = "Waitlist";
+      btn.onclick = () => act(cls, "waitlist", btn);
+    } else {
+      btn.className = "btn";
+      btn.textContent = "Book";
+      btn.onclick = () => act(cls, "book", btn);
+    }
   } else if (rule && !skipped) {
-    // The seat is not ours yet but a rule is going to take it -- on the next run
-    // if the window is open, otherwise the moment it opens. Either way, offering
-    // "Queue" or "Book" would duplicate what the rule already does; the only
-    // useful choice is whether to let it proceed.
-    btn.className = "btn warnish";
-    btn.textContent = "Skip";
-    btn.onclick = () => act(cls, "skip", btn);
-  } else if (rule && skipped) {
-    // Standing down, by request. Tapping puts the rule back in charge rather than
-    // booking directly, so it also works before the window opens.
+    // Not open yet, and the rule is already going to claim it the moment it is.
+    // Queueing on top of that would be a second request for the same seat, so the
+    // rule chip below is the only useful control here. Nothing is suppressed that
+    // could have done anything: booking now would be refused with a 425.
+    primary = false;
+  } else if (queuedIds.has(queueKey(cls))) {
     btn.className = "btn ghost";
-    btn.textContent = "Skipped";
-    btn.onclick = () => act(cls, "unskip", btn);
-  } else if (!open) {
+    btn.textContent = "Queued";
+    btn.onclick = () => act(cls, "unqueue", btn);
+  } else {
     // Booking now would be refused with a 425. Queue it instead: the request is
     // written to the repo and claimed by GitHub Actions when the window opens.
     // This is the only thing here the gym's own site cannot do.
-    if (queuedIds.has(queueKey(cls))) {
-      btn.className = "btn ghost";
-      btn.textContent = "Queued";
-      btn.onclick = () => act(cls, "unqueue", btn);
-    } else {
-      btn.className = "btn warnish";
-      btn.textContent = "Queue";
-      btn.onclick = () => act(cls, "queue", btn);
-    }
-  } else if (cls.isFull) {
-    btn.className = "btn ghost";
-    btn.textContent = "Waitlist";
-    btn.onclick = () => act(cls, "waitlist", btn);
-  } else {
-    btn.className = "btn";
-    btn.textContent = "Book";
-    btn.onclick = () => act(cls, "book", btn);
+    btn.className = "btn warnish";
+    btn.textContent = "Queue";
+    btn.onclick = () => act(cls, "queue", btn);
+  }
+  if (primary) actions.append(btn);
+
+  // The rule control, shown alongside. Pointless once the seat is yours -- the
+  // automation checks for that and stands down on its own -- and cancel() sets the
+  // skip anyway, so offering it there would just be a second way to say the same
+  // thing.
+  if (rule && !held) {
+    const chip = document.createElement("button");
+    chip.className = skipped ? "btn ghost small" : "btn warnish small";
+    chip.textContent = skipped ? "Skipped" : "Skip";
+    chip.title = skipped
+      ? `${rule.id} is standing down on this date. Tap to let it book again.`
+      : `${rule.id} will book this automatically. Tap to skip just this date.`;
+    chip.onclick = () => act(cls, skipped ? "unskip" : "skip", chip);
+    actions.append(chip);
   }
 
-  el.append(time, meta, btn);
+  el.append(time, meta, actions);
   return el;
 }
 
