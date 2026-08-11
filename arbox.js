@@ -176,6 +176,11 @@ function parseRow(row) {
     standby: Number(row.stand_by ?? 0),
     isFull: limit > 0 && registered >= limit,
     spotsLeft: Math.max(0, limit - registered),
+    // Which insert Arbox itself intends: "insertScheduleUser" or "insertStandby".
+    // Preferred over comparing registered against max_users, because the two can
+    // disagree -- a class with max_users 0 reads as "not full" by capacity while
+    // Arbox still wants a standby insert. Seen live on a 0/0 class.
+    bookingOption: String(row.booking_option || ""),
     bookedByMe: !!row.user_booked,
     inStandby: !!row.user_in_standby,
     // Cancelling needs the id of the BOOKING, not of the class -- without it,
@@ -210,24 +215,69 @@ async function loadSchedule() {
 
 // ---------------------------------------------------------------- booking
 
+// Whether joining this class means the waiting list rather than taking a seat.
+//
+// One function, used by both the button label and the request, so the card cannot
+// promise "Book" while book() sends a standby insert.
+//
+// Arbox's own `booking_option` decides it when present -- that is the server stating
+// which insert it will accept. Capacity is only the fallback, because the two
+// disagree: a class with `max_users: 0` reads as "not full" by capacity while Arbox
+// still wants a standby insert. Seen live on a 0/0 class; 51 of 52 upcoming classes
+// agreed, and that one did not.
+function needsStandby(cls) {
+  if (cls.bookingOption === "insertStandby") return true;
+  if (cls.bookingOption === "insertScheduleUser") return false;
+  return cls.isFull;
+}
+
 async function book(cls, viaWaitlist) {
   if (!membershipId) await resolveMembership();
-  await call("/scheduleUser/insert", {
+
+  // Taking a seat and joining the waiting list are DIFFERENT endpoints, exactly as
+  // giving them up is. The payload is identical -- the portal builds it once and
+  // switches only the URL -- so the mistake is easy to make and does not look like
+  // a mistake:
+  //
+  //   scheduleUser/insert     a free seat
+  //   scheduleStandBy/insert  a full class
+  //
+  // Sending the seat endpoint for a full class draws Arbox's own sentence,
+  // "Schedule is full, refresh the schedule page by dragging it down and subscribe
+  // to the waiting list" -- advice aimed at someone looking at a stale page, which
+  // is misleading here: the page was current and the request was simply the wrong
+  // one.
+  //
+  // `viaWaitlist` says what the user consented to; needsStandby() says what Arbox
+  // will accept. A class that filled between the last refresh and the tap must go to
+  // standby too, or the race reports failure for something that would have worked.
+  const standby = needsStandby(cls);
+  if (standby && !viaWaitlist) {
+    // Book was tapped on a class that has since filled. Joining a queue is a
+    // different commitment from taking a seat, so ask rather than silently doing it.
+    throw new Error(`${cls.name} filled up just now. Tap Waitlist to join the queue.`);
+  }
+
+  await call(standby ? "/scheduleStandBy/insert" : "/scheduleUser/insert", {
     method: "POST",
-    // Verified against what the real portal sends. `membership_user_id` -- the
-    // schedule rows call the same concept membership_user_fk, which is wrong here.
+    // Verified against what the real portal sends -- one builder for both endpoints.
+    // `membership_user_id` -- the schedule rows call the same concept
+    // membership_user_fk, which is wrong here.
     body: { extras: null, membership_user_id: membershipId, schedule_id: cls.id },
   });
 
-  // Don't trust the 200 alone: re-read and confirm the seat is really ours. A
+  // Don't trust the 200 alone: re-read and confirm the place is really ours. A
   // cancellation taught us these endpoints can answer 200 and do nothing.
   await loadSchedule();
   const now = classes.find((c) => c.id === cls.id);
   if (now && !now.bookedByMe && !now.inStandby) {
     throw new Error("Arbox accepted the request but you are not on the list.");
   }
-  const waitlisted = viaWaitlist || (now && now.inStandby && !now.bookedByMe);
-  toast(waitlisted ? `On the waiting list for ${cls.name}.` : `Booked ${cls.name} at ${cls.start}.`, "ok");
+  // What happened is read from the server, not assumed from the request: a standby
+  // insert can convert straight to a seat if someone drops out in between.
+  const waitlisted = now ? (now.inStandby && !now.bookedByMe) : standby;
+  toast(waitlisted ? `On the waiting list for ${cls.name} at ${cls.start}.`
+                   : `Booked ${cls.name} at ${cls.start}.`, "ok");
 }
 
 // Whether cancelling this seat counts as a late cancellation. Arbox does not
@@ -512,7 +562,9 @@ function card(cls) {
     btn.onclick = () => act(cls, "cancel", btn);
   } else if (open) {
     // The window is open, so this is bookable right now whatever the rules say.
-    if (cls.isFull) {
+    // The label must be decided by the same signal book() routes on, or the button
+    // says Book and the request goes to standby.
+    if (needsStandby(cls)) {
       btn.className = "btn ghost";
       btn.textContent = "Waitlist";
       btn.onclick = () => act(cls, "waitlist", btn);
