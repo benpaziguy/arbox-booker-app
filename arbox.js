@@ -240,7 +240,44 @@ async function cancel(cls) {
   if (still && (still.bookedByMe || still.inStandby)) {
     throw new Error("Arbox accepted the request but the booking is still there.");
   }
-  toast(`Cancelled ${cls.name} at ${cls.start}.`, "ok");
+
+  // Cancelling is not enough on its own. If a recurring rule wants this slot, the
+  // seat is now free and the next scheduler run -- within half an hour -- books it
+  // straight back. That is not a delay in the cancellation; it is the automation
+  // correctly doing what it was told. So record "not this date" as well.
+  //
+  // Any failure here is reported, never swallowed: a cancellation that silently
+  // fails to stop the rule reads as success and reappears as a booking.
+  let note = "";
+  try {
+    const { rule } = await ruleStateFor(cls);
+    if (rule) {
+      await setSkip(rule.id, cls.date, true);
+      note = ` ${rule.id} will skip this week and resume as normal after.`;
+    }
+  } catch (err) {
+    note = ` Warning: could not stop the recurring rule rebooking it (${err.message}).`;
+  }
+
+  // A queued one-off for the same class would rebook it too, and it is ours to
+  // remove rather than skip.
+  try {
+    if (queueConfigured()) {
+      const rows = await listQueued();
+      const match = rows.find((r) =>
+        r.date === cls.date && String(r.time || "").slice(0, 5) === cls.start &&
+        String(r.class_name || "").toLowerCase() === cls.name.toLowerCase());
+      if (match) {
+        await unqueueId(match.id);
+        queuedIds.delete(queueKey(cls));
+        note += " Its queued request was removed too.";
+      }
+    }
+  } catch (err) {
+    note += ` Warning: a queued request for it may remain (${err.message}).`;
+  }
+
+  toast(`Cancelled ${cls.name} at ${cls.start}.${note}`, "ok");
 }
 
 // Which classes have a pending request, so a card can show "Queued" rather than
@@ -248,25 +285,49 @@ async function cancel(cls) {
 // in scheduler.queue_once.
 const queuedIds = new Set();
 
+// The recurring rules and the dates they are skipping, cached from the same fetch.
+// A card needs these to say "every Tuesday" rather than treating a rule's class as
+// an anonymous booking.
+let ghRules = [];
+let ghSkips = [];
+
 function queueKey(cls) {
   return `${cls.date}|${cls.start}|${cls.name.toLowerCase()}`;
+}
+
+// The rule that will book this class, and whether this date is skipped -- from the
+// cache, so rendering costs no requests.
+function ruleFor(cls) {
+  const rule = matchRule(ghRules, cls);
+  if (!rule) return { rule: null, skipped: false };
+  return {
+    rule,
+    skipped: ghSkips.some((s) =>
+      s && String(s.rule) === String(rule.id) && String(s.date) === cls.date),
+  };
 }
 
 async function refreshQueued({ quiet = true } = {}) {
   if (!queueConfigured()) {
     queuedIds.clear();
+    ghRules = [];
+    ghSkips = [];
     return;
   }
   try {
-    const rows = await listQueued();
+    const state = await loadScheduleState();
     queuedIds.clear();
-    for (const r of rows) {
+    for (const r of state.once) {
       queuedIds.add(`${r.date}|${String(r.time || "").slice(0, 5)}|${String(r.class_name || "").toLowerCase()}`);
     }
+    ghRules = state.rules;
+    ghSkips = state.skips;
   } catch (err) {
     // A bad token must not stop the schedule rendering -- booking still works
     // without queueing, and the error surfaces when they actually tap Queue.
     queuedIds.clear();
+    ghRules = [];
+    ghSkips = [];
     if (!quiet) toast(err.message, "bad");
   }
 }
@@ -298,6 +359,14 @@ async function act(cls, kind, button) {
       if (match) await unqueueId(match.id);
       queuedIds.delete(queueKey(cls));
       toast(`No longer queued: ${cls.name} at ${cls.start}.`, "ok");
+    } else if (kind === "skip" || kind === "unskip") {
+      const { rule } = ruleFor(cls);
+      if (!rule) throw new Error("No recurring rule matches this class.");
+      await setSkip(rule.id, cls.date, kind === "skip");
+      await refreshQueued({ quiet: false });
+      toast(kind === "skip"
+        ? `Skipping ${cls.name} on ${cls.date}. ${rule.id} resumes next week.`
+        : `${rule.id} will book ${cls.name} on ${cls.date} again.`, "ok");
     } else {
       await book(cls, kind === "waitlist");
     }
@@ -337,6 +406,11 @@ function card(cls) {
     detail += ` · opens ${DAYS[(cls.opensAt.getDay() + 6) % 7].slice(0, 3)} ` +
       `${cls.opensAt.getHours()}:${String(cls.opensAt.getMinutes()).padStart(2, "0")}`;
   }
+  // Say when a weekly rule owns this slot, and when it is standing down. Without
+  // this the page cannot explain why a class you never tapped is booked, or why
+  // one you cancelled came back.
+  const { rule, skipped } = ruleFor(cls);
+  if (rule) detail += skipped ? " · skipping this week" : " · weekly";
   sub.textContent = detail;
   meta.append(name, sub);
 
@@ -346,9 +420,26 @@ function card(cls) {
     btn.textContent = "Cancel";
     btn.onclick = () => act(cls, "cancel", btn);
   } else if (cls.inStandby) {
+    // A standby place is a commitment too: it can convert to a real seat, and
+    // leaving the queue is the only way to say "not today". Arbox gives us the
+    // booking id in user_in_standby, so the same cancel path works.
+    btn.className = "btn danger";
+    btn.textContent = "Leave queue";
+    btn.onclick = () => act(cls, "cancel", btn);
+  } else if (rule && !skipped) {
+    // The seat is not ours yet but a rule is going to take it -- on the next run
+    // if the window is open, otherwise the moment it opens. Either way, offering
+    // "Queue" or "Book" would duplicate what the rule already does; the only
+    // useful choice is whether to let it proceed.
+    btn.className = "btn warnish";
+    btn.textContent = "Skip";
+    btn.onclick = () => act(cls, "skip", btn);
+  } else if (rule && skipped) {
+    // Standing down, by request. Tapping puts the rule back in charge rather than
+    // booking directly, so it also works before the window opens.
     btn.className = "btn ghost";
-    btn.textContent = "waiting";
-    btn.disabled = true;
+    btn.textContent = "Skipped";
+    btn.onclick = () => act(cls, "unskip", btn);
   } else if (!open) {
     // Booking now would be refused with a 425. Queue it instead: the request is
     // written to the repo and claimed by GitHub Actions when the window opens.
@@ -496,22 +587,32 @@ async function renderQueue() {
     sub.textContent = state;
     meta.append(name, sub);
 
+    // Removing a request that has already been fulfilled is the trap worth
+    // guarding: the entry disappears, so the page looks like it worked, while the
+    // real seat stays booked and you turn up or lose it late. Once the seat exists
+    // the only honest action is to cancel it with Arbox, so say so on the button.
+    const done = live && (live.bookedByMe || live.inStandby);
     const btn = document.createElement("button");
     btn.className = "btn danger small";
-    btn.textContent = "Remove";
+    btn.textContent = done ? "Cancel" : "Remove";
     btn.onclick = async () => {
       btn.disabled = true;
       btn.textContent = "…";
       try {
-        await unqueueId(r.id);
-        if (live) queuedIds.delete(queueKey(live));
-        toast(`Removed ${r.class_name} on ${r.date}.`, "ok");
+        if (done) {
+          // cancel() removes the queued request itself, and skips a matching rule.
+          await cancel(live);
+        } else {
+          await unqueueId(r.id);
+          if (live) queuedIds.delete(queueKey(live));
+          toast(`Removed ${r.class_name} on ${r.date}.`, "ok");
+        }
         await renderQueue();
         render();
       } catch (err) {
         toast(err.message, "bad");
         btn.disabled = false;
-        btn.textContent = "Remove";
+        btn.textContent = done ? "Cancel" : "Remove";
       }
     };
 

@@ -165,9 +165,81 @@ async function unqueueId(id) {
   return removed;
 }
 
+// ------------------------------------------------------- recurring rules
+
+// The page renders live Arbox classes, which carry no trace of why they were
+// booked, so a seat a weekly rule claimed looks exactly like one booked by hand.
+// That difference matters for exactly one reason: cancelling a class a rule wants
+// hands it straight back, and the next run books it again. Matching the rule here
+// is what lets the cancel path say "and not next time either".
+//
+// Matched on weekday + time + name, the same three fields scheduler.load_rules
+// validates. Not on id, because the page never sees which rule booked a class.
+function rulesFor(doc) {
+  return Array.isArray(doc.rules) ? doc.rules : [];
+}
+
+function isoWeekday(ymdStr) {
+  const d = new Date(ymdStr + "T00:00:00");
+  return d.getDay() === 0 ? 7 : d.getDay();   // JS Sunday is 0; ISO Sunday is 7
+}
+
+function matchRule(rules, cls) {
+  // Both sides trimmed and lowercased, matching scheduler.stand_down. The class
+  // name arrives trimmed from parseRow, but relying on that would make the two
+  // implementations disagree the day it changes.
+  const want = String(cls.name || "").trim().toLowerCase();
+  return rules.find((r) =>
+    Number(r.weekday) === isoWeekday(cls.date) &&
+    String(r.time || "").slice(0, 5) === cls.start &&
+    String(r.class_name || "").trim().toLowerCase() === want &&
+    r.enabled !== false) || null;
+}
+
+// Which recurring rule, if any, will try to book this class -- and whether that
+// date is already being skipped. One fetch, so a card can be rendered without
+// three round trips.
+async function ruleStateFor(cls) {
+  if (!queueConfigured()) return { rule: null, skipped: false };
+  const { doc } = await fetchSchedule();
+  const rule = matchRule(rulesFor(doc), cls);
+  if (!rule) return { rule: null, skipped: false };
+  const skips = Array.isArray(doc.skip) ? doc.skip : [];
+  const skipped = skips.some((s) =>
+    s && String(s.rule) === String(rule.id) && String(s.date) === cls.date);
+  return { rule, skipped };
+}
+
+// Mirrors scheduler.add_skip / remove_skip, including the {rule, date} shape --
+// the Python side validates whatever this writes.
+async function setSkip(ruleId, date, skip) {
+  const { doc, sha } = await fetchSchedule();
+  const skips = Array.isArray(doc.skip) ? doc.skip : [];
+  const has = skips.some((s) => s && String(s.rule) === String(ruleId) && String(s.date) === date);
+  if (skip === has) return false;
+  doc.skip = skip
+    ? [...skips, { rule: ruleId, date }]
+    : skips.filter((s) => !(s && String(s.rule) === String(ruleId) && String(s.date) === date));
+  await putSchedule(doc, sha,
+    `${skip ? "Skip" : "Unskip"} ${ruleId} on ${date}`);
+  return true;
+}
+
 async function listQueued() {
   const { doc } = await fetchSchedule();
   const once = Array.isArray(doc.once) ? doc.once : [];
   return once.slice().sort((a, b) =>
     String(a.date + a.time).localeCompare(String(b.date + b.time)));
+}
+
+// Everything the renderer needs about the schedule, in one request. Rendering a
+// card must not depend on a fetch per card: the list is ~100 classes over a
+// fortnight, and GitHub rate-limits.
+async function loadScheduleState() {
+  const { doc } = await fetchSchedule();
+  return {
+    once: Array.isArray(doc.once) ? doc.once : [],
+    rules: rulesFor(doc),
+    skips: Array.isArray(doc.skip) ? doc.skip : [],
+  };
 }
