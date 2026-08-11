@@ -417,6 +417,9 @@ function showQueue() {
   $("#main").classList.add("hidden");
   $("#queue-view").classList.remove("hidden");
   $("#gh-repo").value = ghRepo;
+  // Name the repo in the instructions, so "Only select repositories" says which one
+  // instead of leaving you to match it up against the field below.
+  $("#gh-repo-label").textContent = ghRepo;
   renderQueue();
 }
 
@@ -573,9 +576,11 @@ $("#queued-btn").onclick = () => {
 $("#queue-back").onclick = hideQueue;
 
 $("#gh-save").onclick = async () => {
-  const repo = $("#gh-repo").value.trim();
-  const tok = $("#gh-token").value.trim();
-  if (!repo || !tok) return toast("Give both the repository and a token.", "bad");
+  // The repo is prefilled, so in practice the token is the only thing to type.
+  const repo = $("#gh-repo").value.trim() || ghRepo;
+  const tok = $("#gh-token").value.trim() || ghToken;
+  if (!tok) return toast("Paste a GitHub token.", "bad");
+  if (!repo) return toast("Give the repository, e.g. you/arbox-booker.", "bad");
   if (!/^[\w.-]+\/[\w.-]+$/.test(repo.replace(/^https?:\/\/github\.com\//, ""))) {
     return toast("Repository should look like you/arbox-booker.", "bad");
   }

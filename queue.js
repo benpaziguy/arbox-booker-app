@@ -22,8 +22,14 @@ const GH_TOKEN_KEY = "arbox-gh-token";
 const GH_REPO_KEY = "arbox-gh-repo";
 const SCHEDULE_PATH = "schedule.json";
 
+// Prefilled so setup is one field instead of two. This is a repository NAME, not a
+// credential: the repo is private, and knowing its name grants nothing without a
+// token. The token is the only secret, and it never ships in this file -- the page
+// is served from a public repo, so anything committed here is world-readable.
+const DEFAULT_REPO = "benpaziguy/arbox-booker";
+
 let ghToken = localStorage.getItem(GH_TOKEN_KEY) || "";
-let ghRepo = localStorage.getItem(GH_REPO_KEY) || "";
+let ghRepo = localStorage.getItem(GH_REPO_KEY) || DEFAULT_REPO;
 
 function queueConfigured() {
   return !!(ghToken && ghRepo);
@@ -38,7 +44,7 @@ function saveQueueConfig(repo, tok) {
 
 function forgetQueueConfig() {
   ghToken = "";
-  ghRepo = "";
+  ghRepo = DEFAULT_REPO;
   localStorage.removeItem(GH_TOKEN_KEY);
   localStorage.removeItem(GH_REPO_KEY);
 }

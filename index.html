@@ -129,9 +129,6 @@
 
     <details id="queue-setup">
       <summary>Queue settings</summary>
-      <label for="gh-repo">Repository</label>
-      <input id="gh-repo" type="text" placeholder="you/arbox-booker"
-             autocapitalize="none" spellcheck="false">
       <label for="gh-token">GitHub token</label>
       <input id="gh-token" type="password" placeholder="github_pat_..."
              autocapitalize="none" spellcheck="false">
@@ -140,13 +137,29 @@
         <button class="btn ghost small" id="gh-forget">Forget</button>
       </div>
       <p class="note">
-        Queueing writes the request into <code>schedule.json</code> in your private
-        repo, because something has to act at 03:00 and it cannot be a phone
-        browser. That needs a token: GitHub → Settings → Developer settings →
-        <em>Fine-grained tokens</em>, only this repository, <strong>Contents:
-        read and write</strong>, nothing else. It is stored on this phone only.
-        Scope it to the one repo so a lost phone cannot reach anything else.
+        Paste a token once and this phone is set up for good — it is remembered, so
+        this is not a per-visit login.
+        <a id="gh-token-link" href="https://github.com/settings/personal-access-tokens/new"
+           target="_blank" rel="noopener">Create one here</a>, set
+        <strong>Repository access → Only select repositories →
+        <span id="gh-repo-label"></span></strong>, then
+        <strong>Repository permissions → Contents → Read and write</strong>. Nothing
+        else is needed.
       </p>
+      <p class="note">
+        Why a token at all: something must act at 03:00 when registration opens, and
+        a phone browser is asleep. So this writes the request into
+        <code>schedule.json</code> and GitHub Actions does the booking. The token
+        cannot be baked into this page — the page is served from a public repo, so it
+        would be readable by anyone. Scoped to one repo, the worst a lost phone can
+        do is edit this schedule.
+      </p>
+      <details style="margin-top:10px">
+        <summary>Use a different repository</summary>
+        <label for="gh-repo">Repository</label>
+        <input id="gh-repo" type="text" placeholder="you/arbox-booker"
+               autocapitalize="none" spellcheck="false">
+      </details>
     </details>
   </section>
 </main>
