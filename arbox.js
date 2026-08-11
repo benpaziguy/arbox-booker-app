@@ -68,6 +68,10 @@ async function call(path, { method = "GET", body = null, auth = true } = {}) {
       err?.messageToUser || err?.message || data?.message || `HTTP ${res.status}`;
     const out = new Error(msg);
     out.status = res.status;
+    // Arbox's own application code is in error.code, and it does not track the HTTP
+    // status: 513 ("this would be a late cancellation") arrives as a 4xx. Callers
+    // that need to tell one refusal from another read this, not the status.
+    out.code = Number(err?.code ?? data?.code) || null;
     throw out;
   }
   return data;
@@ -174,10 +178,18 @@ function parseRow(row) {
     spotsLeft: Math.max(0, limit - registered),
     bookedByMe: !!row.user_booked,
     inStandby: !!row.user_in_standby,
-    // Cancelling needs the id of the BOOKING, not of the class. Arbox puts it in
-    // user_booked (and user_in_standby for a waiting-list place). Without it,
+    // Cancelling needs the id of the BOOKING, not of the class -- without it,
     // scheduleUser/delete returns a cheerful 200 and cancels nothing.
-    scheduleUserId: row.user_booked || row.user_in_standby || null,
+    //
+    // These two are SEPARATE ID SPACES and must never be collapsed into one field.
+    // A seat is a schedule_user row (9 digits here); a waiting-list place is a
+    // schedule_stand_by row (8 digits). They go to different endpoints under
+    // different parameter names. Passing a stand-by id as schedule_user_id is a
+    // valid-looking id for a row that is not yours, and Arbox answers 403 "You
+    // cannot cancel a booking for a user outside your group" -- which reads like a
+    // permissions problem and is really a wrong-id problem.
+    bookingId: row.user_booked || null,
+    standById: row.user_in_standby || null,
     isPast: !!row.past || startsAt < new Date(),
     startsAt,
     opensAt: new Date(startsAt.getTime() - windowHours(row, startsAt) * 3600 * 1000),
@@ -218,37 +230,63 @@ async function book(cls, viaWaitlist) {
   toast(waitlisted ? `On the waiting list for ${cls.name}.` : `Booked ${cls.name} at ${cls.start}.`, "ok");
 }
 
-async function cancel(cls) {
-  // Verified against the real portal: delete needs schedule_user_id AND
-  // schedule_id. Sending schedule_id alone returns HTTP 200 and cancels nothing,
-  // so refuse rather than report a success that did not happen.
-  if (!cls.scheduleUserId) {
-    throw new Error("Cannot find this booking's id. Refresh and try again.");
-  }
-
-  // Arbox asks checkLateCancel first; its answer decides whether the cancellation
-  // counts as late. It returns 200 regardless, so it is advisory, not a result.
-  let late = false;
+// Whether cancelling this seat counts as a late cancellation. Arbox does not
+// answer this in a response body -- checkLateCancel returns 200 with nothing in it
+// when you are inside the free window, and THROWS with error code 513 when you are
+// not. So the answer is carried by the failure, which is why reading
+// `data.late_cancel` always produced false. Straight from the portal's own code:
+//
+//     try{await _0("scheduleUser/checkLateCancel","post",{schedule_id:e.id})}
+//     catch(e){t=513===e.error.code}
+//
+// Advisory either way: any other failure falls through as "not late", exactly as
+// the portal does. A 401 is the exception -- call() has already signed us out, and
+// pressing on would send a tokenless delete whose 401 reads as if the cancellation
+// itself had been rejected.
+async function isLateCancel(cls) {
   try {
-    const check = await call("/scheduleUser/checkLateCancel", {
+    await call("/scheduleUser/checkLateCancel", {
       method: "POST",
       body: { schedule_id: cls.id },
     });
-    late = !!(check?.data?.late_cancel ?? check?.late_cancel);
+    return false;
   } catch (err) {
-    // Advisory call, so a failure here is non-fatal: fall through with
-    // late_cancel false, exactly as the portal does. A 401 is the exception --
-    // call() has already signed us out, and pressing on would send a tokenless
-    // delete whose 401 reads as if the cancellation itself was rejected.
     if (err.status === 401 || /Session expired/.test(err.message)) throw err;
+    return err.code === 513 || err.status === 513;
+  }
+}
+
+async function cancel(cls) {
+  // A waiting-list place and a booked seat are cancelled by different endpoints,
+  // and the page must not guess: `leaving` decides both the request and the wording.
+  // Prefer the real seat when a row somehow carries both, because that is the one
+  // that actually holds a place in the class.
+  const leaving = !cls.bookedByMe && cls.inStandby;
+  const id = leaving ? cls.standById : cls.bookingId;
+  if (!id) {
+    throw new Error(leaving
+      ? "Cannot find this waiting-list place's id. Refresh and try again."
+      : "Cannot find this booking's id. Refresh and try again.");
   }
 
-  const leaving = cls.inStandby && !cls.bookedByMe;
+  // Leaving a queue is never late -- you are giving up a place you never had, so
+  // there is no cancellation policy to breach and the portal does not ask.
+  const late = leaving ? false : await isLateCancel(cls);
+
   try {
-    await call("/scheduleUser/delete", {
-      method: "POST",
-      body: { schedule_user_id: cls.scheduleUserId, schedule_id: cls.id, late_cancel: late },
-    });
+    // Both taken verbatim from the portal bundle's dispatch on booking_option:
+    //   CANCEL_WAIT_LIST      -> scheduleStandBy/delete {schedule_stand_by_id}
+    //   CANCEL_SCHEDULE_USER  -> scheduleUser/delete    {schedule_user_id, schedule_id, late_cancel}
+    // Note the stand-by call sends neither schedule_id nor late_cancel.
+    await (leaving
+      ? call("/scheduleStandBy/delete", {
+        method: "POST",
+        body: { schedule_stand_by_id: id },
+      })
+      : call("/scheduleUser/delete", {
+        method: "POST",
+        body: { schedule_user_id: id, schedule_id: cls.id, late_cancel: late },
+      }));
   } catch (err) {
     // Say which action failed and let Arbox's own sentence stand. A 403 here is a
     // policy decision -- too late to cancel, or a booking the account may not
@@ -450,8 +488,8 @@ function card(cls) {
     btn.onclick = () => act(cls, "cancel", btn);
   } else if (cls.inStandby) {
     // A standby place is a commitment too: it can convert to a real seat, and
-    // leaving the queue is the only way to say "not today". Arbox gives us the
-    // booking id in user_in_standby, so the same cancel path works.
+    // leaving the queue is the only way to say "not today". cancel() sends the
+    // stand-by endpoint for it -- the seat endpoint refuses a stand-by id.
     btn.className = "btn danger";
     btn.textContent = "Leave queue";
     btn.onclick = () => act(cls, "cancel", btn);
