@@ -37,6 +37,40 @@ const $ = (s) => document.querySelector(s);
 
 // ---------------------------------------------------------------- http
 
+// Flatten Arbox's error text into one sentence, whatever shape it arrives in.
+//
+// The shapes seen so far: a plain string; an array of {name, message, value};
+// and -- the one that kept "[object Object]" on screen -- a message that is
+// ITSELF an object, because Arbox is bilingual and nests {he, en} (or similar).
+// So a fixed one-level {message} read is not enough; this walks the structure
+// and collects every string it finds, which cannot produce "[object Object]"
+// however the payload is nested. English keys win when a language pair is
+// obvious, since the app runs with lang=en.
+function messageText(value, depth = 0) {
+  if (value == null || depth > 4) return "";
+  if (typeof value === "string") return value.trim();
+  if (typeof value === "number") return String(value);
+  if (Array.isArray(value)) {
+    return value.map((v) => messageText(v, depth + 1)).filter(Boolean).join(" ");
+  }
+  if (typeof value === "object") {
+    // A {he, en} / {english, hebrew} language pair: take the English side alone,
+    // since the app runs lang=en, rather than concatenating both languages.
+    for (const key of ["en", "english", "eng", "message_en"]) {
+      if (typeof value[key] === "string" && value[key].trim()) return value[key].trim();
+    }
+    // Otherwise read the conventional text-carrying fields ONLY -- never every
+    // value, or machine fields like {name:"limit"} would leak into the sentence.
+    // Each may itself be a string or a nested language object, so recurse.
+    for (const key of ["message", "messageToUser", "text", "description", "he", "hebrew"]) {
+      const got = messageText(value[key], depth + 1);
+      if (got) return got;
+    }
+    return "";
+  }
+  return "";
+}
+
 async function call(path, { method = "GET", body = null, auth = true } = {}) {
   const headers = { ...BASE_HEADERS };
   if (auth) headers.accesstoken = token;
@@ -63,9 +97,17 @@ async function call(path, { method = "GET", body = null, auth = true } = {}) {
     // Arbox nests the useful sentence: {error: {messageToUser, message}}. Reading
     // data.error directly yields "[object Object]", so prefer messageToUser --
     // it is the wording the gym's own site shows.
+    //
+    // messageToUser is usually an ARRAY of {name, message, value} rather than a
+    // string, so it needs joining: interpolating it straight into an Error gave
+    // "[object Object]" -- the very thing this block exists to prevent. That is how
+    // the daily category-limit refusal reached the screen unreadable.
+    // Every candidate goes through messageText so a nested/bilingual object can
+    // never reach the UI as "[object Object]". messageToUser is the wording the
+    // gym's own site shows, so it is preferred; the rest are fallbacks.
     const err = data?.error;
-    const msg = (typeof err === "string" ? err : null) ||
-      err?.messageToUser || err?.message || data?.message || `HTTP ${res.status}`;
+    const msg = messageText(err?.messageToUser) || messageText(err?.message) ||
+      messageText(err) || messageText(data?.message) || `HTTP ${res.status}`;
     const out = new Error(msg);
     out.status = res.status;
     // Arbox's own application code is in error.code, and it does not track the HTTP
@@ -258,13 +300,28 @@ async function book(cls, viaWaitlist) {
     throw new Error(`${cls.name} filled up just now. Tap Waitlist to join the queue.`);
   }
 
-  await call(standby ? "/scheduleStandBy/insert" : "/scheduleUser/insert", {
-    method: "POST",
-    // Verified against what the real portal sends -- one builder for both endpoints.
-    // `membership_user_id` -- the schedule rows call the same concept
-    // membership_user_fk, which is wrong here.
-    body: { extras: null, membership_user_id: membershipId, schedule_id: cls.id },
-  });
+  try {
+    await call(standby ? "/scheduleStandBy/insert" : "/scheduleUser/insert", {
+      method: "POST",
+      // Verified against what the real portal sends -- one builder for both endpoints.
+      // `membership_user_id` -- the schedule rows call the same concept
+      // membership_user_fk, which is wrong here.
+      body: { extras: null, membership_user_id: membershipId, schedule_id: cls.id },
+    });
+  } catch (err) {
+    // The membership caps SEATS per category per day -- one W.O.D a day here -- and
+    // nothing on the schedule row hints at it: the class that hit this reported
+    // booking_option "insertScheduleUser" with 4 of 20 seats free. Only the insert
+    // tells you. Queue places are not capped, so say so, because that is the one
+    // thing the user can still do on that day.
+    if (/reached your limit for category registrations|הגעת למגבלת הרשמות/.test(err.message)) {
+      throw new Error(
+        `${err.message} ` +
+        (standby ? "" : "A waiting-list place is still allowed, or cancel your other class that day."),
+      );
+    }
+    throw err;
+  }
 
   // Don't trust the 200 alone: re-read and confirm the place is really ours. A
   // cancellation taught us these endpoints can answer 200 and do nothing.
