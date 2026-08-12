@@ -147,7 +147,7 @@ function signOut() {
   token = "";
   membershipId = null;
   sessionStorage.removeItem(TOKEN_KEY);
-  // The GitHub token deliberately survives: it is per-phone setup, not part of the
+  // The app secret deliberately survives: it is per-phone setup, not part of the
   // gym session, and re-pasting it on every sign-in would make queueing unusable.
   // "Forget" in Queue settings is how you remove it.
   $("#queue-view").classList.add("hidden");
@@ -517,7 +517,7 @@ async function act(cls, kind, button) {
       if (!queueConfigured()) {
         showQueue();
         $("#queue-setup").open = true;
-        throw new Error("Add a GitHub token first — this is a one-time setup.");
+        throw new Error("Add the app secret first — this is a one-time setup.");
       }
       const entry = await queueClass(cls, true);
       queuedIds.add(queueKey(cls));
@@ -709,10 +709,7 @@ function render() {
 function showQueue() {
   $("#main").classList.add("hidden");
   $("#queue-view").classList.remove("hidden");
-  $("#gh-repo").value = ghRepo;
-  // Name the repo in the instructions, so "Only select repositories" says which one
-  // instead of leaving you to match it up against the field below.
-  $("#gh-repo-label").textContent = ghRepo;
+  $("#worker-url").value = workerUrl;
   renderQueue();
 }
 
@@ -879,23 +876,23 @@ $("#queued-btn").onclick = () => {
 $("#queue-back").onclick = hideQueue;
 
 $("#gh-save").onclick = async () => {
-  // The repo is prefilled, so in practice the token is the only thing to type.
-  const repo = $("#gh-repo").value.trim() || ghRepo;
-  const tok = $("#gh-token").value.trim() || ghToken;
-  if (!tok) return toast("Paste a GitHub token.", "bad");
-  if (!repo) return toast("Give the repository, e.g. you/arbox-booker.", "bad");
-  if (!/^[\w.-]+\/[\w.-]+$/.test(repo.replace(/^https?:\/\/github\.com\//, ""))) {
-    return toast("Repository should look like you/arbox-booker.", "bad");
+  // The Worker URL is prefilled, so in practice the app secret is the only thing
+  // to type.
+  const url = $("#worker-url").value.trim() || workerUrl;
+  const secret = $("#app-secret").value.trim() || appSecret;
+  if (!secret) return toast("Paste the app secret.", "bad");
+  if (!/^https:\/\/\S+$/.test(url)) {
+    return toast("The service URL should start with https://", "bad");
   }
-  saveQueueConfig(repo, tok);
-  // Prove it works now rather than at 03:00: read the file back before claiming
+  saveQueueConfig(url, secret);
+  // Prove it works now rather than at 03:00: read the schedule back before claiming
   // the setup is done.
   try {
     await listQueued();
   } catch (err) {
     return toast(err.message, "bad");
   }
-  $("#gh-token").value = "";
+  $("#app-secret").value = "";
   $("#queue-setup").open = false;
   toast("Queueing is set up on this phone.", "ok");
   await refreshQueued({ quiet: false });
@@ -905,10 +902,10 @@ $("#gh-save").onclick = async () => {
 
 $("#gh-forget").onclick = () => {
   forgetQueueConfig();
-  $("#gh-repo").value = "";
-  $("#gh-token").value = "";
+  $("#worker-url").value = workerUrl;
+  $("#app-secret").value = "";
   queuedIds.clear();
-  toast("Token removed from this phone.", "ok");
+  toast("App secret removed from this phone.", "ok");
   renderQueue();
   render();
 };

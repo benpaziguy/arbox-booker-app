@@ -133,35 +133,31 @@
 
     <details id="queue-setup">
       <summary>Queue settings</summary>
-      <label for="gh-token">GitHub token</label>
-      <input id="gh-token" type="password" placeholder="github_pat_..."
+      <label for="app-secret">App secret</label>
+      <input id="app-secret" type="password" placeholder="paste the app secret"
              autocapitalize="none" spellcheck="false">
       <div class="tools">
         <button class="btn small" id="gh-save">Save</button>
         <button class="btn ghost small" id="gh-forget">Forget</button>
       </div>
       <p class="note">
-        Paste a token once and this phone is set up for good — it is remembered, so
-        this is not a per-visit login.
-        <a id="gh-token-link" href="https://github.com/settings/personal-access-tokens/new"
-           target="_blank" rel="noopener">Create one here</a>, set
-        <strong>Repository access → Only select repositories →
-        <span id="gh-repo-label"></span></strong>, then
-        <strong>Repository permissions → Contents → Read and write</strong>. Nothing
-        else is needed.
+        Paste the app secret once and this phone is set up for good — it is
+        remembered, so this is not a per-visit login. The secret is set on the
+        scheduling service; ask whoever runs it (or, if that is you, it is the
+        Worker's <code>APP_SECRET</code>).
       </p>
       <p class="note">
-        Why a token at all: something must act at 03:00 when registration opens, and
-        a phone browser is asleep. So this writes the request into
-        <code>schedule.json</code> and GitHub Actions does the booking. The token
-        cannot be baked into this page — the page is served from a public repo, so it
-        would be readable by anyone. Scoped to one repo, the worst a lost phone can
-        do is edit this schedule.
+        Why a secret at all: something must act at 03:00 when registration opens, and
+        a phone browser is asleep. So this writes the request into a shared schedule
+        held by a small always-on service, and the booking runs from there. The
+        secret cannot be baked into this page — it is served from a public repo, so
+        it would be readable by anyone. The worst a lost phone can do is edit this
+        schedule; rotate the secret on the service if that happens.
       </p>
       <details style="margin-top:10px">
-        <summary>Use a different repository</summary>
-        <label for="gh-repo">Repository</label>
-        <input id="gh-repo" type="text" placeholder="you/arbox-booker"
+        <summary>Use a different service URL</summary>
+        <label for="worker-url">Service URL</label>
+        <input id="worker-url" type="text" placeholder="https://arbox-kv.you.workers.dev"
                autocapitalize="none" spellcheck="false">
       </details>
     </details>

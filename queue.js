@@ -1,121 +1,104 @@
 "use strict";
 
-// Queueing a class from the phone, with nothing of mine running anywhere.
+// Queueing a class from the phone, with nothing of mine running on a laptop.
 //
 // This is the one thing the gym's own site cannot do: ask for a class now and have
 // it claimed the instant registration opens, days later, while you are asleep.
 // Something has to act at that moment, and it cannot be this page -- a phone
-// browser is not awake at 03:00. GitHub Actions is.
+// browser is not awake at 03:00. GitHub Actions is (for now; the scheduler runs
+// there and reads the same store).
 //
-// So the page does not book the class; it writes the request into schedule.json in
-// the private repo, using the GitHub contents API straight from the browser.
-// api.github.com sends `access-control-allow-origin: *` and allows the
-// Authorization header, so no server of mine is involved here either.
+// The page does not book the class; it writes the request into the shared schedule
+// held in Cloudflare KV, through the arbox-kv Worker. Why the Worker and not KV
+// directly: Cloudflare's KV REST API sends no CORS headers, so a browser cannot
+// call it -- verified with a preflight that returned 405 and no allow-origin. The
+// Worker sets its own CORS and holds the KV binding, so no KV token is in this
+// page. It gates every read/write on a shared secret in the x-app-secret header.
 //
-// The token is a fine-grained PAT with Contents: read and write on that one repo,
-// and nothing else. It is kept in localStorage on the phone, which is the honest
-// trade: a static page has nowhere else to put it. Scope it to the one repository
-// so a stolen phone cannot touch anything but this schedule.
+// The secret is the only credential, kept in localStorage -- the honest trade for
+// a static page. It never ships in this file (served from a public repo, so
+// anything here is world-readable). It guards only the schedule store: not the
+// Arbox login, not the KV admin token. Rotate it on the Worker if a phone is lost.
+//
+// Multi-user note (Rung 5): today there is one schedule and one secret. When users
+// log in, the Worker will key KV per user from their identity and this "paste a
+// secret" step becomes "log in" -- the transport below does not change, only where
+// the secret comes from.
 
-const GH_API = "https://api.github.com";
-const GH_TOKEN_KEY = "arbox-gh-token";
-const GH_REPO_KEY = "arbox-gh-repo";
-const SCHEDULE_PATH = "schedule.json";
+const WORKER_URL_KEY = "arbox-worker-url";
+const APP_SECRET_KEY = "arbox-app-secret";
 
-// Prefilled so setup is one field instead of two. This is a repository NAME, not a
-// credential: the repo is private, and knowing its name grants nothing without a
-// token. The token is the only secret, and it never ships in this file -- the page
-// is served from a public repo, so anything committed here is world-readable.
-const DEFAULT_REPO = "benpaziguy/arbox-booker";
+// Prefilled so setup is one field. This is a public URL, not a credential: hitting
+// it without the secret gets a 401. The secret is what matters, and it is never
+// committed here.
+const DEFAULT_WORKER_URL = "https://arbox-kv.benpaziguy.workers.dev";
 
-let ghToken = localStorage.getItem(GH_TOKEN_KEY) || "";
-let ghRepo = localStorage.getItem(GH_REPO_KEY) || DEFAULT_REPO;
+let workerUrl = localStorage.getItem(WORKER_URL_KEY) || DEFAULT_WORKER_URL;
+let appSecret = localStorage.getItem(APP_SECRET_KEY) || "";
 
 function queueConfigured() {
-  return !!(ghToken && ghRepo);
+  return !!(workerUrl && appSecret);
 }
 
-function saveQueueConfig(repo, tok) {
-  ghRepo = repo.trim().replace(/^https?:\/\/github\.com\//, "").replace(/\/+$/, "");
-  ghToken = tok.trim();
-  localStorage.setItem(GH_REPO_KEY, ghRepo);
-  localStorage.setItem(GH_TOKEN_KEY, ghToken);
+function saveQueueConfig(url, secret) {
+  workerUrl = (url || DEFAULT_WORKER_URL).trim().replace(/\/+$/, "");
+  appSecret = (secret || "").trim();
+  localStorage.setItem(WORKER_URL_KEY, workerUrl);
+  localStorage.setItem(APP_SECRET_KEY, appSecret);
 }
 
 function forgetQueueConfig() {
-  ghToken = "";
-  ghRepo = DEFAULT_REPO;
-  localStorage.removeItem(GH_TOKEN_KEY);
-  localStorage.removeItem(GH_REPO_KEY);
+  workerUrl = DEFAULT_WORKER_URL;
+  appSecret = "";
+  localStorage.setItem(WORKER_URL_KEY, workerUrl);
+  localStorage.removeItem(APP_SECRET_KEY);
 }
 
-async function gh(path, { method = "GET", body = null } = {}) {
-  const res = await fetch(GH_API + path, {
+async function worker(path, { method = "GET", body = null } = {}) {
+  const res = await fetch(workerUrl + path, {
     method,
     headers: {
-      accept: "application/vnd.github+json",
-      authorization: `Bearer ${ghToken}`,
-      "x-github-api-version": "2022-11-28",
+      "x-app-secret": appSecret,
       ...(body ? { "content-type": "application/json" } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
   });
 
   let data = null;
-  try { data = await res.json(); } catch { /* 204 has no body */ }
+  try { data = await res.json(); } catch { /* some responses have no body */ }
 
   if (!res.ok) {
-    // Map the failures that actually happen to what to do about them. The bare
-    // GitHub message ("Not Found" for a token missing a scope) sends you hunting
-    // in the wrong place.
-    if (res.status === 401) throw new Error("GitHub rejected the token. Paste a new one in Queue settings.");
-    if (res.status === 404) {
-      throw new Error(`Cannot see ${ghRepo}. Check the name, and that the token grants ` +
-        `Contents access to that repository.`);
+    // Map the failures that actually happen to what to do about them.
+    if (res.status === 401) {
+      throw new Error("The app secret is wrong or missing. Paste it again in ⚙ Queue.");
     }
-    if (res.status === 403 && (data?.message || "").includes("rate limit")) {
-      throw new Error("GitHub rate limit reached. Try again in a few minutes.");
+    if (res.status === 404 && /no schedule/i.test(data?.error || "")) {
+      throw new Error("No schedule is stored yet. Seed it from the Mac (migrate_schedule.py) first.");
     }
-    if (res.status === 403) throw new Error("The token lacks Contents: read and write on this repository.");
-    if (res.status === 409) throw new Error("The schedule changed while saving. Try again.");
-    throw new Error(data?.message || `GitHub HTTP ${res.status}`);
+    if (res.status === 422) throw new Error("The schedule change was rejected as malformed.");
+    if (res.status === 0 || res.status >= 500) {
+      throw new Error(`The schedule service is unreachable (HTTP ${res.status}). Try again.`);
+    }
+    throw new Error(data?.error || `Schedule service HTTP ${res.status}`);
   }
   return data;
 }
 
-// UTF-8 safe base64. A class name with a non-ASCII character would make plain
-// btoa() throw, and the schedule is written with ensure_ascii=False.
-function b64encode(str) {
-  const bytes = new TextEncoder().encode(str);
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin);
-}
-
-function b64decode(b64) {
-  const bin = atob(b64.replace(/\s/g, ""));
-  const bytes = Uint8Array.from(bin, (ch) => ch.charCodeAt(0));
-  return new TextDecoder().decode(bytes);
-}
-
 async function fetchSchedule() {
-  const file = await gh(`/repos/${ghRepo}/contents/${SCHEDULE_PATH}`);
-  const doc = JSON.parse(b64decode(file.content));
-  return { doc, sha: file.sha };
+  const doc = await worker("/schedule");
+  // sha kept in the shape for callers that still pass it back to putSchedule; the
+  // Worker does not use optimistic concurrency, so it is always null. (The phone is
+  // effectively the only interactive writer; the scheduler mostly reads. A future
+  // revision could add an ETag if concurrent writers become common.)
+  return { doc, sha: null };
 }
 
-// The sha is passed back on write, so GitHub rejects the update if the file changed
-// underneath us -- the scheduler's own --prune, or an edit from the Mac. Better a
-// 409 the user can retry than silently reverting someone else's change.
-async function putSchedule(doc, sha, message) {
-  await gh(`/repos/${ghRepo}/contents/${SCHEDULE_PATH}`, {
-    method: "PUT",
-    body: {
-      message,
-      content: b64encode(JSON.stringify(doc, null, 2) + "\n"),
-      sha,
-    },
-  });
+// sha and message are accepted for signature parity with the old GitHub path but
+// not used: the Worker keys off the single "schedule" entry and needs no commit
+// message. Last-write-wins, which for one phone is fine and still removes the git
+// push races that motivated the move.
+async function putSchedule(doc, _sha, _message) {
+  await worker("/schedule", { method: "PUT", body: doc });
 }
 
 function onceId(cls, existing) {
