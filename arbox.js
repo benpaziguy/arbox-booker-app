@@ -147,9 +147,9 @@ function signOut() {
   token = "";
   membershipId = null;
   sessionStorage.removeItem(TOKEN_KEY);
-  // The app secret deliberately survives: it is per-phone setup, not part of the
-  // gym session, and re-pasting it on every sign-in would make queueing unusable.
-  // "Forget" in Queue settings is how you remove it.
+  // One credential now: the scheduling-service session is part of the same sign-in,
+  // so sign-out clears it too (best-effort revoke server-side, always cleared here).
+  signOutWorker();
   $("#queue-view").classList.add("hidden");
   showSignedIn(false);
 }
@@ -515,9 +515,7 @@ async function act(cls, kind, button) {
       await cancel(cls);
     } else if (kind === "queue") {
       if (!queueConfigured()) {
-        showQueue();
-        $("#queue-setup").open = true;
-        throw new Error("Add the app secret first — this is a one-time setup.");
+        throw new Error("Sign in again to queue — the session has expired.");
       }
       const entry = await queueClass(cls, true);
       queuedIds.add(queueKey(cls));
@@ -541,6 +539,18 @@ async function act(cls, kind, button) {
       toast(kind === "skip"
         ? `Skipping ${cls.name} on ${cls.date}. ${rule.id} resumes next week.`
         : `${rule.id} will book ${cls.name} on ${cls.date} again.`, "ok");
+    } else if (kind === "recur") {
+      const days = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+      const dow = days[new Date(cls.date + "T00:00:00").getDay()];
+      await addRule(cls, true);
+      await refreshQueued({ quiet: false });
+      toast(`Added to your weekly schedule: ${cls.name} every ${dow} at ${cls.start}.`, "ok");
+    } else if (kind === "unrecur") {
+      const removed = await removeRule(cls);
+      await refreshQueued({ quiet: false });
+      toast(removed
+        ? `Stopped the weekly booking of ${cls.name} at ${cls.start}.`
+        : `No weekly rule matched ${cls.name} at ${cls.start}.`, "ok");
     } else {
       await book(cls, kind === "waitlist");
     }
@@ -665,6 +675,27 @@ function card(cls) {
     actions.append(chip);
   }
 
+  // The weekly control. Separate from Skip (which is one date): this adds or
+  // removes the recurring RULE for this weekday+time+class. Shown whenever queueing
+  // is configured (i.e. signed in) and the seat is not already yours to cancel.
+  if (queueConfigured() && !held) {
+    const wk = document.createElement("button");
+    if (rule) {
+      wk.className = "btn ghost small";
+      wk.textContent = "Stop recurring";
+      wk.title = `Remove the weekly rule ${rule.id}, so it stops booking this slot.`;
+      wk.onclick = () => act(cls, "unrecur", wk);
+    } else {
+      wk.className = "btn ghost small";
+      wk.textContent = "Add to weekly";
+      const days = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"];
+      const dow = days[new Date(cls.date + "T00:00:00").getDay()];
+      wk.title = `Book ${cls.name} every ${dow} at ${cls.start} automatically.`;
+      wk.onclick = () => act(cls, "recur", wk);
+    }
+    actions.append(wk);
+  }
+
   el.append(time, meta, actions);
   return el;
 }
@@ -709,7 +740,6 @@ function render() {
 function showQueue() {
   $("#main").classList.add("hidden");
   $("#queue-view").classList.remove("hidden");
-  $("#worker-url").value = workerUrl;
   renderQueue();
 }
 
@@ -725,9 +755,8 @@ async function renderQueue() {
   if (!queueConfigured()) {
     const p = document.createElement("p");
     p.className = "empty";
-    p.textContent = "Queueing is not set up yet — open Queue settings below.";
+    p.textContent = "Sign in to queue classes and set up weekly bookings.";
     host.append(p);
-    $("#queue-setup").open = true;
     return;
   }
 
@@ -852,8 +881,18 @@ $("#signin").onclick = async () => {
   btn.disabled = true;
   btn.textContent = "Signing in…";
   try {
+    // One credential: signIn verifies email+password against Arbox. Only if that
+    // succeeds do we register/sign-in with our own Worker using the SAME details,
+    // so the scheduler can book for this person. Signup first (new member), and if
+    // the account already exists, fall back to login -- both end with a session.
     await signIn(email, password);
     if ($("#remember").checked) localStorage.setItem("arbox-email", email);
+    try {
+      await signUpWorker(email, password);
+    } catch (err) {
+      if (/already exists/i.test(err.message)) await signInWorker(email, password);
+      else throw err;
+    }
     await start();
   } catch (err) {
     toast(err.message, "bad");
@@ -875,40 +914,10 @@ $("#queued-btn").onclick = () => {
 };
 $("#queue-back").onclick = hideQueue;
 
-$("#gh-save").onclick = async () => {
-  // The Worker URL is prefilled, so in practice the app secret is the only thing
-  // to type.
-  const url = $("#worker-url").value.trim() || workerUrl;
-  const secret = $("#app-secret").value.trim() || appSecret;
-  if (!secret) return toast("Paste the app secret.", "bad");
-  if (!/^https:\/\/\S+$/.test(url)) {
-    return toast("The service URL should start with https://", "bad");
-  }
-  saveQueueConfig(url, secret);
-  // Prove it works now rather than at 03:00: read the schedule back before claiming
-  // the setup is done.
-  try {
-    await listQueued();
-  } catch (err) {
-    return toast(err.message, "bad");
-  }
-  $("#app-secret").value = "";
-  $("#queue-setup").open = false;
-  toast("Queueing is set up on this phone.", "ok");
-  await refreshQueued({ quiet: false });
-  await renderQueue();
-  render();
-};
-
-$("#gh-forget").onclick = () => {
-  forgetQueueConfig();
-  $("#worker-url").value = workerUrl;
-  $("#app-secret").value = "";
-  queuedIds.clear();
-  toast("App secret removed from this phone.", "ok");
-  renderQueue();
-  render();
-};
+// Queueing no longer needs separate setup: signing in registers/signs-in with the
+// scheduling service using the same email+password (one credential). So there is
+// no token to paste and no "queue settings" form -- if you are signed in, queueing
+// works.
 
 $("#email").value = localStorage.getItem("arbox-email") || "";
 

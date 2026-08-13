@@ -26,41 +26,66 @@
 // the secret comes from.
 
 const WORKER_URL_KEY = "arbox-worker-url";
-const APP_SECRET_KEY = "arbox-app-secret";
+const SESSION_KEY = "arbox-session";
 
-// Prefilled so setup is one field. This is a public URL, not a credential: hitting
-// it without the secret gets a 401. The secret is what matters, and it is never
-// committed here.
-const DEFAULT_WORKER_URL = "https://arbox-kv.benpaziguy.workers.dev";
+// Prefilled so setup is one field. This is a public URL, not a credential: every
+// data route needs a valid session token, which comes from logging in.
+const DEFAULT_WORKER_URL = "https://arbox-next.benpaziguy.workers.dev";
 
-let workerUrl = localStorage.getItem(WORKER_URL_KEY) || DEFAULT_WORKER_URL;
-let appSecret = localStorage.getItem(APP_SECRET_KEY) || "";
+// A phone that used the old single-user app has the OLD worker URL cached in
+// localStorage; that Worker has no /signup, so a stored old-default must not stick.
+// Ignore any stored URL that is a retired single-user host, falling back to the
+// current default. A user who deliberately set a custom URL still keeps it. Kept as
+// a one-line assignment so tests that stub via a regex on this line stay simple.
+const RETIRED_WORKER_URLS = ["https://arbox-kv.benpaziguy.workers.dev"];
+function pickWorkerUrl(stored) { return stored && !RETIRED_WORKER_URLS.includes(stored) ? stored : DEFAULT_WORKER_URL; }
+let workerUrl = pickWorkerUrl(localStorage.getItem(WORKER_URL_KEY));
+let sessionToken = localStorage.getItem(SESSION_KEY) || "";
 
+// "Configured" now means "signed in". The session token authorises every data
+// call; there is no separate app secret any more (Rung 5 -- one credential).
 function queueConfigured() {
-  return !!(workerUrl && appSecret);
+  return !!(workerUrl && sessionToken);
 }
 
-function saveQueueConfig(url, secret) {
-  workerUrl = (url || DEFAULT_WORKER_URL).trim().replace(/\/+$/, "");
-  appSecret = (secret || "").trim();
-  localStorage.setItem(WORKER_URL_KEY, workerUrl);
-  localStorage.setItem(APP_SECRET_KEY, appSecret);
+function setSession(token) {
+  sessionToken = (token || "").trim();
+  if (sessionToken) localStorage.setItem(SESSION_KEY, sessionToken);
+  else localStorage.removeItem(SESSION_KEY);
 }
 
 function forgetQueueConfig() {
-  workerUrl = DEFAULT_WORKER_URL;
-  appSecret = "";
-  localStorage.setItem(WORKER_URL_KEY, workerUrl);
-  localStorage.removeItem(APP_SECRET_KEY);
+  setSession("");
 }
 
-async function worker(path, { method = "GET", body = null } = {}) {
+// Sign up (create the account) or sign in. The phone has ALREADY verified the
+// email+password against Arbox before calling these (see arbox.js signIn), so the
+// Worker's signup gate is simply "the account does not exist yet".
+async function signUpWorker(email, password) {
+  const data = await worker("/signup", { method: "POST", auth: false,
+    body: { email, password } });
+  setSession(data.token);
+  return data;
+}
+
+async function signInWorker(email, password) {
+  const data = await worker("/login", { method: "POST", auth: false,
+    body: { email, password } });
+  setSession(data.token);
+  return data;
+}
+
+async function signOutWorker() {
+  try { if (sessionToken) await worker("/logout", { method: "POST" }); }
+  catch { /* revoking is best-effort; clearing locally is what matters */ }
+  setSession("");
+}
+
+async function worker(path, { method = "GET", body = null, auth = true } = {}) {
+  const headers = { ...(body ? { "content-type": "application/json" } : {}) };
+  if (auth && sessionToken) headers["authorization"] = `Bearer ${sessionToken}`;
   const res = await fetch(workerUrl + path, {
-    method,
-    headers: {
-      "x-app-secret": appSecret,
-      ...(body ? { "content-type": "application/json" } : {}),
-    },
+    method, headers,
     body: body ? JSON.stringify(body) : undefined,
   });
 
@@ -70,12 +95,15 @@ async function worker(path, { method = "GET", body = null } = {}) {
   if (!res.ok) {
     // Map the failures that actually happen to what to do about them.
     if (res.status === 401) {
-      throw new Error("The app secret is wrong or missing. Paste it again in ⚙ Queue.");
+      // On a data call this means the session expired; force a fresh sign-in.
+      if (auth) setSession("");
+      throw new Error(data?.error || "Please sign in again.");
     }
     if (res.status === 404 && /no schedule/i.test(data?.error || "")) {
-      throw new Error("No schedule is stored yet. Seed it from the Mac (migrate_schedule.py) first.");
+      throw new Error("No schedule for this account yet.");
     }
-    if (res.status === 422) throw new Error("The schedule change was rejected as malformed.");
+    if (res.status === 409) throw new Error(data?.error || "That account already exists.");
+    if (res.status === 422) throw new Error(data?.error || "The request was rejected as malformed.");
     if (res.status === 0 || res.status >= 500) {
       throw new Error(`The schedule service is unreachable (HTTP ${res.status}). Try again.`);
     }
@@ -191,6 +219,59 @@ async function ruleStateFor(cls) {
   const skipped = skips.some((s) =>
     s && String(s.rule) === String(rule.id) && String(s.date) === cls.date);
   return { rule, skipped };
+}
+
+// A stable rule id from the slot, mirroring the ids already in schedule.json
+// (e.g. "tue-2000-wod"): weekday abbrev + HHMM + a slug of the class name.
+function newRuleId(cls) {
+  const days = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"];
+  const d = new Date(cls.date + "T00:00:00").getDay();
+  const hhmm = cls.start.replace(":", "");
+  const slug = String(cls.name || "").trim().toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24) || "class";
+  return `${days[d]}-${hhmm}-${slug}`;
+}
+
+// Add a weekly recurring rule for this class's weekday + time + class name. No-op
+// (returns the existing rule) if one already matches, so a double tap is safe.
+// waitlist defaults true, matching the existing rules. Mirrors the rule shape
+// scheduler.load_rules validates.
+async function addRule(cls, waitlist = true) {
+  const { doc, sha } = await fetchSchedule();
+  const rules = rulesFor(doc);
+  const existing = matchRule(rules, cls);
+  if (existing) return existing;
+
+  const taken = new Set(rules.map((r) => String(r.id)));
+  let id = newRuleId(cls);
+  for (let n = 2; taken.has(id); n++) id = `${newRuleId(cls)}-${n}`;
+
+  const rule = {
+    id,
+    weekday: isoWeekday(cls.date),
+    time: cls.start,
+    class_name: cls.name,
+    waitlist: !!waitlist,
+    enabled: true,
+  };
+  doc.rules = [...rules, rule];
+  await putSchedule(doc, sha, `Add weekly ${cls.name} ${cls.start}`);
+  return rule;
+}
+
+// Remove the weekly rule that owns this class (matched on weekday+time+name), and
+// any skip rows for it. Returns the removed rule, or null if none matched.
+async function removeRule(cls) {
+  const { doc, sha } = await fetchSchedule();
+  const rules = rulesFor(doc);
+  const rule = matchRule(rules, cls);
+  if (!rule) return null;
+  doc.rules = rules.filter((r) => String(r.id) !== String(rule.id));
+  // A skip only makes sense with its rule; drop orphans so they cannot linger.
+  const skips = Array.isArray(doc.skip) ? doc.skip : [];
+  doc.skip = skips.filter((s) => !(s && String(s.rule) === String(rule.id)));
+  await putSchedule(doc, sha, `Stop weekly ${cls.name} ${cls.start}`);
+  return rule;
 }
 
 // Mirrors scheduler.add_skip / remove_skip, including the {rule, date} shape --

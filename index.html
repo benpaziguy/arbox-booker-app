@@ -72,10 +72,8 @@
   .empty { color:var(--dim); font-size:14px; padding:24px 2px; }
   .note { font-size:12.5px; color:var(--dim); line-height:1.5; margin-top:14px; }
   #gate { max-width:420px; margin:0 auto; padding:8px 0; }
-  #gate label, #queue-setup label { display:block; font-size:13px; color:var(--dim); margin:14px 0 5px; }
+  #gate label { display:block; font-size:13px; color:var(--dim); margin:14px 0 5px; }
   code { background:#0d1016; padding:1px 5px; border-radius:4px; font-size:12px; }
-  #queue-setup { margin-top:22px; border-top:1px solid var(--line); padding-top:12px; }
-  #queue-setup summary { font-size:13px; color:var(--dim); cursor:pointer; }
   .btn.warnish { background:var(--warn); color:#231600; }
 </style>
 </head>
@@ -131,36 +129,10 @@
     </div>
     <div id="queue-list"></div>
 
-    <details id="queue-setup">
-      <summary>Queue settings</summary>
-      <label for="app-secret">App secret</label>
-      <input id="app-secret" type="password" placeholder="paste the app secret"
-             autocapitalize="none" spellcheck="false">
-      <div class="tools">
-        <button class="btn small" id="gh-save">Save</button>
-        <button class="btn ghost small" id="gh-forget">Forget</button>
-      </div>
-      <p class="note">
-        Paste the app secret once and this phone is set up for good — it is
-        remembered, so this is not a per-visit login. The secret is set on the
-        scheduling service; ask whoever runs it (or, if that is you, it is the
-        Worker's <code>APP_SECRET</code>).
-      </p>
-      <p class="note">
-        Why a secret at all: something must act at 03:00 when registration opens, and
-        a phone browser is asleep. So this writes the request into a shared schedule
-        held by a small always-on service, and the booking runs from there. The
-        secret cannot be baked into this page — it is served from a public repo, so
-        it would be readable by anyone. The worst a lost phone can do is edit this
-        schedule; rotate the secret on the service if that happens.
-      </p>
-      <details style="margin-top:10px">
-        <summary>Use a different service URL</summary>
-        <label for="worker-url">Service URL</label>
-        <input id="worker-url" type="text" placeholder="https://arbox-kv.you.workers.dev"
-               autocapitalize="none" spellcheck="false">
-      </details>
-    </details>
+    <p class="note">
+      Queueing and weekly bookings are set up automatically when you sign in — the
+      same email and password. Nothing else to configure on this phone.
+    </p>
   </section>
 </main>
 
