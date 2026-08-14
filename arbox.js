@@ -174,6 +174,21 @@ function showSignedIn(yes) {
   $("#refresh").classList.toggle("hidden", !yes);
   $("#signout").classList.toggle("hidden", !yes);
   $("#queued-btn").classList.toggle("hidden", !yes);
+  syncHeaderHeight();
+}
+
+// The day-strip sticks below the header; the header's height changes when the
+// filter row shows/hides, so publish the real height as a CSS variable rather than
+// hardcode it. rAF so it is measured after the layout settles.
+function syncHeaderHeight() {
+  // Defensive so this no-ops under a stubbed DOM (tests) rather than throwing.
+  if (typeof requestAnimationFrame !== "function") return;
+  requestAnimationFrame(() => {
+    const h = document.querySelector("header");
+    if (h && h.offsetHeight && document.documentElement && document.documentElement.style) {
+      document.documentElement.style.setProperty("--header-h", h.offsetHeight + "px");
+    }
+  });
 }
 
 function signOut() {
@@ -1143,6 +1158,13 @@ $("#email").value = localStorage.getItem("arbox-email") || "";
 if (localStorage.getItem(REMEMBER_KEY) !== null) {
   $("#remember").checked = localStorage.getItem(REMEMBER_KEY) === "1";
 }
+
+// Keep the day-strip's sticky offset correct across rotation / font changes.
+// Guarded: `window` is not a global in every runtime (e.g. the test harness).
+if (typeof window !== "undefined" && window.addEventListener) {
+  window.addEventListener("resize", syncHeaderHeight);
+}
+syncHeaderHeight();
 
 // A token (persisted or session) means we are already signed in -- go straight in.
 if (token) start(); else showSignedIn(false);

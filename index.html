@@ -79,9 +79,12 @@
     color:var(--dim); margin:18px 2px 6px; }
   /* Day strip: a horizontal, swipeable row of day pills -- the week/date picker.
      Sticky so it stays put while the day's classes scroll under it. */
-  .day-strip { display:flex; gap:8px; overflow-x:auto; padding:4px 0 10px;
+  /* Stick BELOW the sticky header (which sits at top:0 with a higher z-index), so
+     the selected day + date stays visible as the class list scrolls under it. The
+     top offset tracks the header's height via a variable set on <header>. */
+  .day-strip { display:flex; gap:8px; overflow-x:auto; padding:8px 0 10px;
     margin:0 -2px 6px; scrollbar-width:none; position:sticky;
-    top:0; background:var(--bg); z-index:3; }
+    top:var(--header-h, 60px); background:var(--bg); z-index:3; }
   .day-strip::-webkit-scrollbar { display:none; }
   .day-pill { flex:none; min-width:56px; border:1px solid var(--line);
     background:var(--card); color:var(--dim); border-radius:12px; padding:8px 10px;
