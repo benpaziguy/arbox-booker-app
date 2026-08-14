@@ -135,6 +135,11 @@ async function signIn(email, password) {
 
 // Header controls only make sense once there is a session, so they follow the gate.
 function showSignedIn(yes) {
+  // The help/queue sub-views are only reachable while signed in; reset them so a
+  // sign-out lands back on the gate (and the ? button, which stays visible, opens
+  // help over whichever base view is showing).
+  $("#help-view").classList.add("hidden");
+  $("#queue-view").classList.add("hidden");
   $("#gate").classList.toggle("hidden", yes);
   $("#main").classList.toggle("hidden", !yes);
   $("#tools").classList.toggle("hidden", !yes);
@@ -748,6 +753,56 @@ function hideQueue() {
   $("#main").classList.remove("hidden");
 }
 
+// ---------------------------------------------------------------- help / legend
+
+// The button legend, built from the same classes the real cards use so the chips
+// match exactly. Each entry: [button label, button class, what it means].
+const LEGEND = [
+  ["Book", "btn", "Take a spot now — the class is open and has room."],
+  ["Waitlist", "btn ghost", "The class is open but full; join the waiting list. If someone drops out you move in."],
+  ["Queue", "btn warnish", "Registration isn't open yet. The app grabs your spot the moment it opens, even at 3am."],
+  ["Cancel", "btn danger", "You're booked; give up the spot."],
+  ["Leave queue", "btn danger", "You're on the waiting list; give up your place."],
+  ["Add to weekly", "btn ghost small", "Book this class automatically every week."],
+  ["Stop recurring", "btn ghost small", "Stop the weekly booking of this class."],
+  ["Skip", "btn warnish small", "Miss just this one week; the weekly booking resumes after."],
+];
+
+function buildLegend() {
+  const host = $("#legend");
+  if (!host || host.dataset.built) return;   // build once
+  for (const [label, cls, meaning] of LEGEND) {
+    const row = document.createElement("div");
+    row.className = "legend-row";
+    const chip = document.createElement("button");
+    chip.className = cls;
+    chip.textContent = label;
+    chip.tabIndex = -1;
+    const desc = document.createElement("span");
+    desc.textContent = meaning;
+    row.append(chip, desc);
+    host.append(row);
+  }
+  host.dataset.built = "1";
+}
+
+function showHelp() {
+  buildLegend();
+  // Hide every base view (gate when signed out, main/queue when signed in) so help
+  // shows alone; hideHelp restores the correct one.
+  $("#gate").classList.add("hidden");
+  $("#main").classList.add("hidden");
+  $("#queue-view").classList.add("hidden");
+  $("#help-view").classList.remove("hidden");
+}
+
+function hideHelp() {
+  $("#help-view").classList.add("hidden");
+  // Return to the right base view: the schedule if signed in, else the sign-in gate.
+  if (token) $("#main").classList.remove("hidden");
+  else $("#gate").classList.remove("hidden");
+}
+
 // The recurring rules as a plain-language summary: what auto-books every week,
 // and the status of the NEXT occurrence of each (booked / queued for its window /
 // skipped this week / not found). ghRules and ghSkips are already loaded by
@@ -979,6 +1034,12 @@ $("#mine-only").addEventListener("change", render);
 $("#refresh").onclick = () =>
   loadSchedule().then(() => refreshQueued()).then(render).catch((e) => toast(e.message, "bad"));
 $("#signout").onclick = signOut;
+
+// Help works signed in or out (a friend can read it at the sign-in screen). The
+// ? button toggles it over whatever is showing.
+$("#help-btn").onclick = () =>
+  $("#help-view").classList.contains("hidden") ? showHelp() : hideHelp();
+$("#help-back").onclick = hideHelp;
 
 $("#queued-btn").onclick = () => {
   if ($("#queue-view").classList.contains("hidden")) showQueue(); else hideQueue();

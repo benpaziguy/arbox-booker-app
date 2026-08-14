@@ -77,6 +77,11 @@
   .btn.warnish { background:var(--warn); color:#231600; }
   .section-label { font-size:12px; text-transform:uppercase; letter-spacing:.05em;
     color:var(--dim); margin:18px 2px 6px; }
+  /* Legend: a fixed-width chip mimicking each real button, then its meaning. */
+  .legend-row { display:flex; align-items:flex-start; gap:12px; margin:9px 0; }
+  .legend-row .btn { min-width:104px; text-align:center; pointer-events:none; flex:none; }
+  .legend-row span { font-size:13px; color:var(--dim); padding-top:8px; }
+  #help-view ul.note li { margin:5px 0; }
 </style>
 </head>
 <body>
@@ -84,6 +89,7 @@
 <header>
   <div class="bar">
     <h1>Arbox booker</h1>
+    <button class="btn ghost small" id="help-btn" aria-label="Help" title="How it works">?</button>
     <button class="btn ghost small" id="queued-btn">Queue</button>
     <button class="btn ghost small" id="refresh">Refresh</button>
     <button class="btn ghost small" id="signout">Sign out</button>
@@ -95,6 +101,44 @@
 </header>
 
 <main>
+  <!-- In-app help / legend. Toggled by the ? button; friends won't read a separate
+       file, so the guide lives here. -->
+  <section id="help-view" class="hidden">
+    <div class="bar" style="margin-bottom:6px">
+      <h1 style="font-size:16px">How it works</h1>
+      <button class="btn ghost small" id="help-back">Done</button>
+    </div>
+
+    <p class="note" style="margin-top:6px">
+      Sign in with your <strong>gym (Arbox) email and password</strong> — the same
+      login as the gym's own app. That's the only setup. The app books your classes
+      for you, including the ones that fill the instant registration opens (usually
+      48h before; 72h for Sun/Mon) — even at 3am, whether or not your phone is on.
+    </p>
+
+    <div class="section-label">The buttons on a class</div>
+    <div id="legend"></div>
+
+    <div class="section-label">Weekly bookings</div>
+    <p class="note" style="margin-top:0">
+      <strong>Add to weekly</strong> books that class every week automatically.
+      <strong>Stop recurring</strong> ends it. Going to miss just one week? Tap
+      <strong>Skip</strong> on that date — it pauses only that week.
+      Tap <strong>Queue</strong> (top) to see <em>Your weekly classes</em> and the
+      status of each: booked, books at its window, skipped, or paused.
+    </p>
+
+    <div class="section-label">Good to know</div>
+    <ul class="note" style="margin-top:0; padding-left:18px">
+      <li>The gym allows <strong>one booking per class type per day</strong>. A second
+        is refused — the app tells you. A waiting-list spot is still allowed.</li>
+      <li>Cancelling a class your weekly rule books also skips that date, so it isn't
+        instantly re-booked. It resumes the next week.</li>
+      <li>Manage your account under <strong>Queue → Account</strong> (sign out, or
+        delete your saved schedule and stored login).</li>
+    </ul>
+  </section>
+
   <section id="gate">
     <label for="email">Arbox email</label>
     <input id="email" type="email" inputmode="email" autocomplete="username"

@@ -1,29 +1,24 @@
 "use strict";
 
-// Queueing a class from the phone, with nothing of mine running on a laptop.
+// Queueing and weekly rules from the phone, with nothing of ours on the phone.
 //
-// This is the one thing the gym's own site cannot do: ask for a class now and have
-// it claimed the instant registration opens, days later, while you are asleep.
-// Something has to act at that moment, and it cannot be this page -- a phone
-// browser is not awake at 03:00. GitHub Actions is (for now; the scheduler runs
-// there and reads the same store).
+// This is the thing the gym's own site cannot do: ask for a class now and have it
+// claimed the instant registration opens, days later, at 03:00. A phone browser is
+// asleep then, so the booking runs elsewhere (the scheduler, in GitHub Actions) --
+// this page only records what each user wants.
 //
-// The page does not book the class; it writes the request into the shared schedule
-// held in Cloudflare KV, through the arbox-kv Worker. Why the Worker and not KV
-// directly: Cloudflare's KV REST API sends no CORS headers, so a browser cannot
-// call it -- verified with a preflight that returned 405 and no allow-origin. The
-// Worker sets its own CORS and holds the KV binding, so no KV token is in this
-// page. It gates every read/write on a shared secret in the x-app-secret header.
+// The page talks to our Cloudflare Worker over HTTPS: /signup and /login (verified
+// first against Arbox by arbox.js, so only real members get in), then /schedule and
+// /creds and /account, all authorised by a SESSION TOKEN in the Authorization:
+// Bearer header. The Worker holds the D1 binding and stores each user's schedule and
+// their encrypted Arbox password; nothing sensitive lives in this file (it is served
+// from a public repo). The session token is kept in localStorage -- the honest trade
+// for a static page -- and is the only thing on the device; losing the phone risks
+// only this account's schedule, and signing out or deleting the account clears it.
 //
-// The secret is the only credential, kept in localStorage -- the honest trade for
-// a static page. It never ships in this file (served from a public repo, so
-// anything here is world-readable). It guards only the schedule store: not the
-// Arbox login, not the KV admin token. Rotate it on the Worker if a phone is lost.
-//
-// Multi-user note (Rung 5): today there is one schedule and one secret. When users
-// log in, the Worker will key KV per user from their identity and this "paste a
-// secret" step becomes "log in" -- the transport below does not change, only where
-// the secret comes from.
+// One credential (Rung 5): the account IS the gym login. There is no separate app
+// password and no shared secret -- signing in with the gym email+password is what
+// authorises everything below.
 
 const WORKER_URL_KEY = "arbox-worker-url";
 const SESSION_KEY = "arbox-session";
