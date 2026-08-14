@@ -846,6 +846,36 @@ function showQueue() {
   $("#history-view").classList.add("hidden");
   $("#queue-view").classList.remove("hidden");
   renderQueue();
+  refreshNotifyUI();
+}
+
+// Reflect the notification state on the toggle: on / off / "add to Home Screen
+// first" (iOS) / unsupported. Best-effort -- a failure here must not break the view.
+async function refreshNotifyUI() {
+  const btn = $("#notify-toggle");
+  const note = $("#notify-note");
+  if (!btn) return;
+  const support = pushSupport();
+  if (support === "unsupported") {
+    btn.classList.add("hidden");
+    note.textContent = "This browser can't show notifications.";
+    return;
+  }
+  if (support === "ios-home") {
+    btn.classList.add("hidden");
+    note.textContent = "On iPhone: tap Share → Add to Home Screen, open it from there, "
+      + "then this option will let you turn on notifications.";
+    return;
+  }
+  btn.classList.remove("hidden");
+  let on = false;
+  try { on = await pushEnabled(); } catch { on = false; }
+  btn.textContent = on ? "Notifications on — tap to turn off"
+                       : "Notify me when a class is booked";
+  btn.classList.toggle("warnish", !on);
+  note.textContent = on
+    ? "You'll get a notification when the app books (or fails to book) a class for you."
+    : "";
 }
 
 function hideQueue() {
@@ -1223,6 +1253,21 @@ $("#history-btn").onclick = () =>
   $("#history-view").classList.contains("hidden")
     ? showHistory().catch((e) => toast(e.message, "bad")) : hideHistory();
 $("#history-back").onclick = hideHistory;
+
+$("#notify-toggle").onclick = async () => {
+  const btn = $("#notify-toggle");
+  btn.disabled = true;
+  const wasOn = /on —/.test(btn.textContent);
+  try {
+    if (wasOn) { await disablePush(); toast("Notifications turned off.", "ok"); }
+    else { await enablePush(); toast("Notifications on. You'll hear when a class books.", "ok"); }
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    btn.disabled = false;
+    refreshNotifyUI();
+  }
+};
 
 // Account controls. Sign out clears this phone (and revokes the session server
 // side, best-effort). Delete account removes everything for this user and cannot

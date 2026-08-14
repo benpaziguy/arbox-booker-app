@@ -84,6 +84,72 @@ async function deleteAccountWorker() {
   setSession("");
 }
 
+// ---------------------------------------------------------------- web push
+//
+// "Notify me when a class is booked." The browser subscribes to its push service
+// using the server's VAPID public key; we send that subscription to the Worker,
+// which stores it per user. The scheduler later pushes to it. All of this is
+// gated on real support -- and on iOS specifically, on the app being installed to
+// the Home Screen (see pushSupport()).
+
+function base64UrlToUint8Array(b64) {
+  const pad = "=".repeat((4 - (b64.length % 4)) % 4);
+  const raw = atob((b64 + pad).replace(/-/g, "+").replace(/_/g, "/"));
+  return Uint8Array.from(raw, (c) => c.charCodeAt(0));
+}
+
+// What the current device can do, so the UI can explain rather than silently fail.
+//   "ok"        -> push is available now
+//   "ios-home"  -> iOS Safari, but only works once Added to Home Screen
+//   "unsupported" -> this browser can't do web push at all
+function pushSupport() {
+  const hasApi = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+  const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent);
+  // iOS only fires push for an installed PWA (standalone display mode).
+  const standalone = window.matchMedia?.("(display-mode: standalone)").matches
+    || window.navigator.standalone === true;
+  if (isIOS && !standalone) return "ios-home";
+  if (!hasApi) return "unsupported";
+  return "ok";
+}
+
+async function pushEnabled() {
+  if (pushSupport() !== "ok") return false;
+  const reg = await navigator.serviceWorker.getRegistration();
+  const sub = reg && (await reg.pushManager.getSubscription());
+  return !!sub;
+}
+
+// Subscribe this device and register it with the Worker. Returns true on success.
+async function enablePush() {
+  if (pushSupport() !== "ok") throw new Error("Notifications aren't available on this device.");
+  const { vapid_public_key } = await worker("/config", { auth: false });
+  if (!vapid_public_key) throw new Error("Notifications are not configured on the server yet.");
+
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") throw new Error("Notifications were not allowed.");
+
+  const reg = await navigator.serviceWorker.register("sw.js");
+  await navigator.serviceWorker.ready;
+  const sub = await reg.pushManager.subscribe({
+    userVisibleOnly: true,
+    applicationServerKey: base64UrlToUint8Array(vapid_public_key),
+  });
+  await worker("/push", { method: "POST", body: { subscription: sub.toJSON() } });
+  return true;
+}
+
+async function disablePush() {
+  const reg = await navigator.serviceWorker.getRegistration();
+  const sub = reg && (await reg.pushManager.getSubscription());
+  if (sub) {
+    // Tell the Worker first (so a failed unsubscribe doesn't orphan the row), then
+    // drop the browser subscription.
+    try { await worker("/push", { method: "DELETE", body: { endpoint: sub.endpoint } }); } catch { /* ignore */ }
+    await sub.unsubscribe();
+  }
+}
+
 async function worker(path, { method = "GET", body = null, auth = true } = {}) {
   const headers = { ...(body ? { "content-type": "application/json" } : {}) };
   if (auth && sessionToken) headers["authorization"] = `Bearer ${sessionToken}`;
