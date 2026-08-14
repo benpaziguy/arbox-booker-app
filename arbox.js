@@ -5,8 +5,10 @@
 // can log in, read the schedule, book and cancel. That is what makes this work on
 // cellular, on any network, with nothing running on a laptop.
 //
-// Your password is used once to get a token and is never stored. The token goes in
-// sessionStorage, so it is gone when you close the tab.
+// Your password is used once to get a token and is never stored. With "Remember me"
+// the Arbox token is kept in localStorage so you stay signed in across app restarts;
+// without it the token lives in sessionStorage and is gone when you close the tab.
+// Either way it is the token, not the password, and signing out clears it.
 
 const API = "https://apiappv2.arboxapp.com/api/v2";
 const LOCATION_ID = 48;
@@ -28,8 +30,35 @@ const BASE_HEADERS = {
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const TOKEN_KEY = "arbox-token";
+const REMEMBER_KEY = "arbox-remember";
 
-let token = sessionStorage.getItem(TOKEN_KEY) || "";
+// The token may be persisted (localStorage, "Remember me") or session-only
+// (sessionStorage). On load, prefer the persisted one so a remembered user is
+// still signed in after closing the app.
+let token = localStorage.getItem(TOKEN_KEY) || sessionStorage.getItem(TOKEN_KEY) || "";
+
+// Store the token in the chosen place, and clear it from the other so the two
+// never disagree. remember=true -> localStorage (survives restart); else
+// sessionStorage (gone on close).
+function saveToken(tok, remember) {
+  token = tok;
+  if (remember) {
+    localStorage.setItem(TOKEN_KEY, tok);
+    sessionStorage.removeItem(TOKEN_KEY);
+    localStorage.setItem(REMEMBER_KEY, "1");
+  } else {
+    sessionStorage.setItem(TOKEN_KEY, tok);
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.setItem(REMEMBER_KEY, "0");   // remember the choice was "no"
+  }
+}
+
+function clearToken() {
+  token = "";
+  sessionStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(REMEMBER_KEY);
+}
 let membershipId = null;
 let classes = [];
 
@@ -121,7 +150,7 @@ async function call(path, { method = "GET", body = null, auth = true } = {}) {
 
 // ---------------------------------------------------------------- auth
 
-async function signIn(email, password) {
+async function signIn(email, password, remember) {
   const data = await call("/user/siteLogin", {
     method: "POST",
     auth: false,
@@ -129,8 +158,7 @@ async function signIn(email, password) {
   });
   const tok = data?.data?.token;
   if (!tok) throw new Error("No token in the login response.");
-  token = tok;
-  sessionStorage.setItem(TOKEN_KEY, token);
+  saveToken(tok, remember);
 }
 
 // Header controls only make sense once there is a session, so they follow the gate.
@@ -149,9 +177,8 @@ function showSignedIn(yes) {
 }
 
 function signOut() {
-  token = "";
+  clearToken();          // drops the Arbox token from both stores + the remember flag
   membershipId = null;
-  sessionStorage.removeItem(TOKEN_KEY);
   // One credential now: the scheduling-service session is part of the same sign-in,
   // so sign-out clears it too (best-effort revoke server-side, always cleared here).
   signOutWorker();
@@ -705,12 +732,17 @@ function card(cls) {
   return el;
 }
 
+// Which day the list is showing. null until the first render picks one.
+let selectedDay = null;
+
 function render() {
   const host = $("#list");
   host.textContent = "";
   const filter = $("#filter").value.trim().toLowerCase();
   const mineOnly = $("#mine-only").checked;
 
+  // Filter first (by search + mine), THEN group by day -- so the day strip only
+  // offers days that actually have something to show under the current filter.
   const shown = classes.filter((c) => {
     if (mineOnly && !c.bookedByMe && !c.inStandby) return false;
     return !filter || c.name.toLowerCase().includes(filter);
@@ -724,20 +756,48 @@ function render() {
     return;
   }
 
-  let day = null;
+  // Days with at least one matching class, in order.
+  const days = [...new Set(shown.map((c) => c.date))].sort();
+  // Keep the selection if it still has classes; else default to today, else the
+  // first available day.
   const today = ymd(new Date());
-  for (const cls of shown) {
-    if (cls.date !== day) {
-      day = cls.date;
-      const h = document.createElement("div");
-      h.className = "day-title";
-      const d = new Date(day + "T00:00:00");
-      h.textContent = (day === today ? "Today · " : "") +
-        `${DAYS[(d.getDay() + 6) % 7]} ${d.getDate()}/${d.getMonth() + 1}`;
-      host.append(h);
-    }
-    host.append(card(cls));
+  if (!days.includes(selectedDay)) {
+    selectedDay = days.includes(today) ? today : days[0];
   }
+
+  host.append(renderDayStrip(days, today));
+
+  const dayClasses = shown.filter((c) => c.date === selectedDay);
+  if (!dayClasses.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "Nothing on this day.";
+    host.append(p);
+    return;
+  }
+  for (const cls of dayClasses) host.append(card(cls));
+}
+
+// A horizontal strip of tappable day pills -- the "week / date picker". Shows every
+// day in range that has classes; tapping one switches the list to that day.
+function renderDayStrip(days, today) {
+  const strip = document.createElement("div");
+  strip.className = "day-strip";
+  for (const date of days) {
+    const d = new Date(date + "T00:00:00");
+    const pill = document.createElement("button");
+    pill.className = "day-pill" + (date === selectedDay ? " on" : "");
+    const dow = document.createElement("div");
+    dow.className = "dow";
+    dow.textContent = date === today ? "Today" : DAYS[(d.getDay() + 6) % 7].slice(0, 3);
+    const dm = document.createElement("div");
+    dm.className = "dm";
+    dm.textContent = `${d.getDate()}/${d.getMonth() + 1}`;
+    pill.append(dow, dm);
+    pill.onclick = () => { selectedDay = date; render(); };
+    strip.append(pill);
+  }
+  return strip;
 }
 
 // ---------------------------------------------------------------- queue view
@@ -1011,8 +1071,10 @@ $("#signin").onclick = async () => {
     // succeeds do we register/sign-in with our own Worker using the SAME details,
     // so the scheduler can book for this person. Signup first (new member), and if
     // the account already exists, fall back to login -- both end with a session.
-    await signIn(email, password);
-    if ($("#remember").checked) localStorage.setItem("arbox-email", email);
+    const remember = $("#remember").checked;
+    await signIn(email, password, remember);
+    if (remember) localStorage.setItem("arbox-email", email);
+    else localStorage.removeItem("arbox-email");
     try {
       await signUpWorker(email, password);
     } catch (err) {
@@ -1059,8 +1121,7 @@ $("#acct-delete").onclick = async () => {
   btn.disabled = true; btn.textContent = "Deleting…";
   try {
     await deleteAccountWorker();
-    token = "";                       // also drop the Arbox session on this device
-    sessionStorage.removeItem(TOKEN_KEY);
+    clearToken();                     // also drop the Arbox session on this device
     localStorage.removeItem("arbox-email");
     toast("Account deleted.", "ok");
     hideQueue();
@@ -1078,6 +1139,10 @@ $("#acct-delete").onclick = async () => {
 // works.
 
 $("#email").value = localStorage.getItem("arbox-email") || "";
+// Reflect a prior "Remember me" choice; default (first visit) stays the HTML checked.
+if (localStorage.getItem(REMEMBER_KEY) !== null) {
+  $("#remember").checked = localStorage.getItem(REMEMBER_KEY) === "1";
+}
 
-// A token in sessionStorage means this tab was already signed in.
+// A token (persisted or session) means we are already signed in -- go straight in.
 if (token) start(); else showSignedIn(false);
