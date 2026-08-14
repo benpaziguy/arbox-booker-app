@@ -106,6 +106,7 @@
   <div class="bar">
     <h1>Arbox booker</h1>
     <button class="btn ghost small" id="help-btn" aria-label="Help" title="How it works">?</button>
+    <button class="btn ghost small" id="history-btn">History</button>
     <button class="btn ghost small" id="queued-btn">Queue</button>
     <button class="btn ghost small" id="refresh">Refresh</button>
     <button class="btn ghost small" id="signout">Sign out</button>
@@ -207,6 +208,15 @@
         and stored gym credentials from the service for good — it cannot be undone.
       </p>
     </details>
+  </section>
+
+  <!-- Past classes you attended, from Arbox. Read straight from the phone. -->
+  <section id="history-view" class="hidden">
+    <div class="bar" style="margin-bottom:6px">
+      <h1 style="font-size:16px">Your history</h1>
+      <button class="btn ghost small" id="history-back">Done</button>
+    </div>
+    <div id="history-list"></div>
   </section>
 </main>
 

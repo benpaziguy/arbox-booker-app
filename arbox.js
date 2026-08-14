@@ -168,12 +168,14 @@ function showSignedIn(yes) {
   // help over whichever base view is showing).
   $("#help-view").classList.add("hidden");
   $("#queue-view").classList.add("hidden");
+  $("#history-view").classList.add("hidden");
   $("#gate").classList.toggle("hidden", yes);
   $("#main").classList.toggle("hidden", !yes);
   $("#tools").classList.toggle("hidden", !yes);
   $("#refresh").classList.toggle("hidden", !yes);
   $("#signout").classList.toggle("hidden", !yes);
   $("#queued-btn").classList.toggle("hidden", !yes);
+  $("#history-btn").classList.toggle("hidden", !yes);
   syncHeaderHeight();
 }
 
@@ -300,6 +302,28 @@ async function loadSchedule() {
   classes = (data?.data || []).map(parseRow).filter((c) => !c.isPast);
   classes.sort((a, b) => a.startsAt - b.startsAt);
   render();
+}
+
+// The user's OWN past classes, newest first. Uses /schedule/getUserClasses (a POST
+// with a JSON body -- direction:"past" returns only what is behind today) rather
+// than betweenDates, because that endpoint returns per-user attendance including
+// classes that are no longer in the forward schedule window.
+async function loadHistory() {
+  // direction:"both" -- NOT "past". Arbox's "past" mode reliably 500s (server bug,
+  // confirmed live), while "both" works and returns the user's classes around the
+  // pivot date; we filter to past ones ourselves.
+  const data = await call("/schedule/getUserClasses", {
+    method: "POST",
+    body: { boxes_id: Number(BOX_FK), locations_box_id: LOCATION_ID,
+            date: ymd(new Date()), direction: "both" },
+  });
+  const now = new Date();
+  return (data?.data || [])
+    .map(parseRow)
+    // Keep only classes that were actually yours (a seat or a waiting-list place)
+    // and have already happened.
+    .filter((c) => (c.bookedByMe || c.inStandby) && c.startsAt < now)
+    .sort((a, b) => b.startsAt - a.startsAt);   // newest first
 }
 
 // ---------------------------------------------------------------- booking
@@ -819,6 +843,7 @@ function renderDayStrip(days, today) {
 
 function showQueue() {
   $("#main").classList.add("hidden");
+  $("#history-view").classList.add("hidden");
   $("#queue-view").classList.remove("hidden");
   renderQueue();
 }
@@ -826,6 +851,76 @@ function showQueue() {
 function hideQueue() {
   $("#queue-view").classList.add("hidden");
   $("#main").classList.remove("hidden");
+}
+
+// ---------------------------------------------------------------- history view
+
+async function showHistory() {
+  $("#main").classList.add("hidden");
+  $("#queue-view").classList.add("hidden");
+  $("#history-view").classList.remove("hidden");
+  await renderHistory();
+}
+
+function hideHistory() {
+  $("#history-view").classList.add("hidden");
+  $("#main").classList.remove("hidden");
+}
+
+async function renderHistory() {
+  const host = $("#history-list");
+  host.textContent = "Loading…";
+  let past;
+  try {
+    past = await loadHistory();
+  } catch (err) {
+    host.textContent = "";
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = err.message;
+    host.append(p);
+    return;
+  }
+  host.textContent = "";
+  if (!past.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "No past classes found.";
+    host.append(p);
+    return;
+  }
+
+  let month = null;
+  for (const cls of past) {
+    const d = new Date(cls.date + "T00:00:00");
+    const label = d.toLocaleDateString([], { month: "long", year: "numeric" });
+    if (label !== month) {
+      month = label;
+      const h = document.createElement("div");
+      h.className = "section-label";
+      h.textContent = label;
+      host.append(h);
+    }
+    const el = document.createElement("div");
+    el.className = "card";
+    const time = document.createElement("div");
+    time.className = "time";
+    time.textContent = cls.start;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = cls.name;
+    const sub = document.createElement("div");
+    sub.className = "sub";
+    const dow = DAYS[(d.getDay() + 6) % 7].slice(0, 3);
+    const kind = cls.inStandby && !cls.bookedByMe ? " · waiting list" : "";
+    sub.textContent = `${dow} ${d.getDate()}/${d.getMonth() + 1}`
+      + (cls.coach ? ` · ${cls.coach}` : "") + kind;
+    meta.append(name, sub);
+    el.append(time, meta);
+    host.append(el);
+  }
 }
 
 // ---------------------------------------------------------------- help / legend
@@ -868,6 +963,7 @@ function showHelp() {
   $("#gate").classList.add("hidden");
   $("#main").classList.add("hidden");
   $("#queue-view").classList.add("hidden");
+  $("#history-view").classList.add("hidden");
   $("#help-view").classList.remove("hidden");
 }
 
@@ -1122,6 +1218,11 @@ $("#queued-btn").onclick = () => {
   if ($("#queue-view").classList.contains("hidden")) showQueue(); else hideQueue();
 };
 $("#queue-back").onclick = hideQueue;
+
+$("#history-btn").onclick = () =>
+  $("#history-view").classList.contains("hidden")
+    ? showHistory().catch((e) => toast(e.message, "bad")) : hideHistory();
+$("#history-back").onclick = hideHistory;
 
 // Account controls. Sign out clears this phone (and revokes the session server
 // side, best-effort). Delete account removes everything for this user and cannot
