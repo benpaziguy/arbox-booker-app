@@ -75,6 +75,8 @@
   #gate label { display:block; font-size:13px; color:var(--dim); margin:14px 0 5px; }
   code { background:#0d1016; padding:1px 5px; border-radius:4px; font-size:12px; }
   .btn.warnish { background:var(--warn); color:#231600; }
+  .section-label { font-size:12px; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--dim); margin:18px 2px 6px; }
 </style>
 </head>
 <body>
@@ -133,6 +135,18 @@
       Queueing and weekly bookings are set up automatically when you sign in — the
       same email and password. Nothing else to configure on this phone.
     </p>
+
+    <details id="account-settings" style="margin-top:18px">
+      <summary style="font-size:13px;color:var(--dim);cursor:pointer">Account</summary>
+      <div class="tools" style="margin-top:10px">
+        <button class="btn ghost small" id="acct-signout">Sign out</button>
+        <button class="btn danger small" id="acct-delete">Delete account</button>
+      </div>
+      <p class="note">
+        Sign out just clears this phone. Delete account removes your saved schedule
+        and stored gym credentials from the service for good — it cannot be undone.
+      </p>
+    </details>
   </section>
 </main>
 

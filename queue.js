@@ -81,6 +81,14 @@ async function signOutWorker() {
   setSession("");
 }
 
+// Delete the account and everything it owns (rules, one-offs, skips, stored Arbox
+// credentials, sessions). Irreversible; the caller confirms first. Clears the local
+// session afterward since it no longer exists server-side.
+async function deleteAccountWorker() {
+  await worker("/account", { method: "DELETE" });
+  setSession("");
+}
+
 async function worker(path, { method = "GET", body = null, auth = true } = {}) {
   const headers = { ...(body ? { "content-type": "application/json" } : {}) };
   if (auth && sessionToken) headers["authorization"] = `Bearer ${sessionToken}`;

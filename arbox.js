@@ -748,6 +748,68 @@ function hideQueue() {
   $("#main").classList.remove("hidden");
 }
 
+// The recurring rules as a plain-language summary: what auto-books every week,
+// and the status of the NEXT occurrence of each (booked / queued for its window /
+// skipped this week / not found). ghRules and ghSkips are already loaded by
+// refreshQueued; `classes` spans a fortnight, enough to find each rule's next hit.
+function renderWeeklySummary(host) {
+  const label = document.createElement("div");
+  label.className = "section-label";
+  label.textContent = "Your weekly classes";
+  host.append(label);
+
+  if (!ghRules.length) {
+    const p = document.createElement("p");
+    p.className = "empty";
+    p.textContent = "None yet. Tap “Add to weekly” on any class to book it every week.";
+    host.append(p);
+    return;
+  }
+
+  const now = new Date();
+  for (const rule of ghRules) {
+    // The next live class this rule matches (soonest not-past occurrence).
+    const upcoming = classes
+      .filter((c) => c.name.toLowerCase() === String(rule.class_name || "").toLowerCase() &&
+                     c.start === String(rule.time || "").slice(0, 5) &&
+                     isoWeekday(c.date) === Number(rule.weekday))
+      .sort((a, b) => a.startsAt - b.startsAt);
+    const next = upcoming[0] || null;
+
+    const el = document.createElement("div");
+    el.className = "card";
+    const time = document.createElement("div");
+    time.className = "time";
+    time.textContent = String(rule.time || "").slice(0, 5);
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.textContent = rule.class_name;
+    const sub = document.createElement("div");
+    sub.className = "sub";
+
+    const dow = ["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"][Number(rule.weekday) - 1] || "?";
+    let state = `Every ${dow}`;
+    if (rule.enabled === false) {
+      state += " · paused";
+    } else if (!next) {
+      state += " · no class found in the next two weeks";
+    } else {
+      const skipped = ghSkips.some((s) => String(s.rule) === String(rule.id) && String(s.date) === next.date);
+      if (next.bookedByMe) state += " · next one booked ✓";
+      else if (next.inStandby) state += " · next one: on the waiting list";
+      else if (skipped) state += " · skipped this week, resumes after";
+      else if (next.opensAt <= now) state += " · books on the next run";
+      else state += ` · books ${next.opensAt.toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}`;
+    }
+    sub.textContent = state;
+    meta.append(name, sub);
+    el.append(time, meta);
+    host.append(el);
+  }
+}
+
 async function renderQueue() {
   const host = $("#queue-list");
   host.textContent = "";
@@ -760,6 +822,10 @@ async function renderQueue() {
     return;
   }
 
+  // --- Your weekly classes: the recurring rules, each with its next occurrence
+  // and status, so it is obvious at a glance what will auto-book. ---
+  renderWeeklySummary(host);
+
   let rows;
   try {
     rows = await listQueued();
@@ -770,6 +836,11 @@ async function renderQueue() {
     host.append(p);
     return;
   }
+
+  const onceHeader = document.createElement("div");
+  onceHeader.className = "section-label";
+  onceHeader.textContent = "One-off queued classes";
+  host.append(onceHeader);
 
   const today = ymd(new Date());
   // A past request is inert rather than wrong -- it matches no class, so the
@@ -913,6 +984,32 @@ $("#queued-btn").onclick = () => {
   if ($("#queue-view").classList.contains("hidden")) showQueue(); else hideQueue();
 };
 $("#queue-back").onclick = hideQueue;
+
+// Account controls. Sign out clears this phone (and revokes the session server
+// side, best-effort). Delete account removes everything for this user and cannot
+// be undone, so it double-confirms with the email typed back.
+$("#acct-signout").onclick = () => { signOut(); toast("Signed out on this phone.", "ok"); };
+
+$("#acct-delete").onclick = async () => {
+  const who = localStorage.getItem("arbox-email") || "your account";
+  if (!confirm(`Delete ${who}? This removes your saved schedule and stored gym `
+             + `credentials from the service permanently. This cannot be undone.`)) return;
+  const btn = $("#acct-delete");
+  btn.disabled = true; btn.textContent = "Deleting…";
+  try {
+    await deleteAccountWorker();
+    token = "";                       // also drop the Arbox session on this device
+    sessionStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem("arbox-email");
+    toast("Account deleted.", "ok");
+    hideQueue();
+    showSignedIn(false);
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    btn.disabled = false; btn.textContent = "Delete account";
+  }
+};
 
 // Queueing no longer needs separate setup: signing in registers/signs-in with the
 // scheduling service using the same email+password (one credential). So there is
