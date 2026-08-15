@@ -36,9 +36,25 @@
     color:var(--dim); margin:20px 0 8px;
   }
   .card {
-    display:flex; align-items:center; gap:12px; background:var(--card);
+    display:flex; align-items:center; flex-wrap:wrap; gap:12px; background:var(--card);
     border:1px solid var(--line); border-radius:12px; padding:11px 13px; margin-bottom:8px;
   }
+  /* The WOD / roster drawer wraps onto its own full-width line under the card row. */
+  .drawer { flex:0 0 100%; border-top:1px solid var(--line); margin-top:4px; padding-top:10px; }
+  .wod-section { margin:0 0 12px; }
+  .wod-section:last-child { margin-bottom:0; }
+  .wod-head { font-size:12px; text-transform:uppercase; letter-spacing:.05em;
+    color:var(--accent); font-weight:700; margin-bottom:3px; }
+  .wod-body { font-size:13.5px; color:var(--text); white-space:pre-wrap; word-break:break-word; }
+  .roster-row { display:flex; align-items:center; gap:9px; padding:4px 0; }
+  .avatar { flex:none; width:28px; height:28px; border-radius:50%; overflow:hidden;
+    background:var(--line); color:var(--text); font-size:11px; font-weight:700;
+    display:flex; align-items:center; justify-content:center; text-transform:uppercase; }
+  .avatar img { width:100%; height:100%; object-fit:cover; display:block; }
+  .roster-name { font-size:13.5px; color:var(--text); min-width:0;
+    overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .roster-name.friend { color:var(--ok); font-weight:650; }
+  .btn.on { border-color:var(--accent); color:var(--text); box-shadow:inset 0 0 0 1px var(--accent); }
   .time { font-variant-numeric:tabular-nums; font-weight:700; min-width:48px; }
   .meta { flex:1; min-width:0; }
   .name { font-size:15px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -107,6 +123,7 @@
     <h1>Arbox booker</h1>
     <button class="btn ghost small" id="help-btn" aria-label="Help" title="How it works">?</button>
     <button class="btn ghost small" id="history-btn">History</button>
+    <button class="btn ghost small" id="feedback-btn">Feedback</button>
     <button class="btn ghost small" id="queued-btn">Queue</button>
     <button class="btn ghost small" id="refresh">Refresh</button>
     <button class="btn ghost small" id="signout">Sign out</button>
@@ -153,6 +170,11 @@
         instantly re-booked. It resumes the next week.</li>
       <li>Manage your account under <strong>Queue → Account</strong> (sign out, or
         delete your saved schedule and stored login).</li>
+      <li>Tap <strong>WOD</strong> on a class to read that day's workout, and
+        <strong>Who's in</strong> to see who's booked. A ⭐ marks your Arbox friends,
+        and a card shows how many friends are going.</li>
+      <li>Hit <strong>Feedback</strong> (top) to send a bug report or feature
+        request straight to the app's maintainer.</li>
     </ul>
   </section>
 
@@ -214,6 +236,30 @@
         and stored gym credentials from the service for good — it cannot be undone.
       </p>
     </details>
+  </section>
+
+  <!-- Feedback: post a bug report or feature request. Goes to the Worker + D1. -->
+  <section id="feedback-view" class="hidden">
+    <div class="bar" style="margin-bottom:6px">
+      <h1 style="font-size:16px">Send feedback</h1>
+      <button class="btn ghost small" id="feedback-back">Done</button>
+    </div>
+    <p class="note" style="margin-top:6px">
+      Found a bug or want a feature? Tell me here. It goes straight to the app's
+      maintainer — no email, no account beyond the one you're signed in with.
+    </p>
+    <label for="feedback-kind" style="display:block;font-size:13px;color:var(--dim);margin:14px 0 5px">
+      What is it?</label>
+    <select id="feedback-kind" style="width:100%;padding:11px 12px;font-size:16px;color:var(--text);background:var(--card);border:1px solid var(--line);border-radius:10px">
+      <option value="feature">Feature request</option>
+      <option value="bug">Bug report</option>
+      <option value="other">Something else</option>
+    </select>
+    <label for="feedback-text" style="display:block;font-size:13px;color:var(--dim);margin:14px 0 5px">
+      Your message</label>
+    <textarea id="feedback-text" rows="5" placeholder="Describe it…"
+      style="width:100%;padding:11px 12px;font-size:16px;color:var(--text);background:var(--card);border:1px solid var(--line);border-radius:10px;resize:vertical;font-family:inherit"></textarea>
+    <button class="btn" id="feedback-send" style="margin-top:14px;width:100%">Send feedback</button>
   </section>
 
   <!-- Past classes you attended, from Arbox. Read straight from the phone. -->

@@ -169,6 +169,7 @@ function showSignedIn(yes) {
   $("#help-view").classList.add("hidden");
   $("#queue-view").classList.add("hidden");
   $("#history-view").classList.add("hidden");
+  $("#feedback-view").classList.add("hidden");
   $("#gate").classList.toggle("hidden", yes);
   $("#main").classList.toggle("hidden", !yes);
   $("#tools").classList.toggle("hidden", !yes);
@@ -176,6 +177,7 @@ function showSignedIn(yes) {
   $("#signout").classList.toggle("hidden", !yes);
   $("#queued-btn").classList.toggle("hidden", !yes);
   $("#history-btn").classList.toggle("hidden", !yes);
+  $("#feedback-btn").classList.toggle("hidden", !yes);
   syncHeaderHeight();
 }
 
@@ -260,6 +262,15 @@ function parseRow(row) {
     id: row.id,
     date,
     start,
+    // The workout attached to this class. Every schedule/history row carries it,
+    // and the WOD content is fetched separately by id (/logbook/workout/:id) --
+    // the row itself never embeds the workout text.
+    workoutId: row.workout_id || null,
+    // Everyone booked into this class, straight off the schedule row: no extra
+    // request. Each is {id (a global users id, matchable to friends), first_name,
+    // last_name, full_name, image, checked_in}. The mobile app's "Booked" roster
+    // renders exactly this. Kept as-is; the card decides how to show it.
+    bookedUsers: Array.isArray(row.booked_users) ? row.booked_users : [],
     name: (text(row.box_categories) || text(row.name) || "Class").trim(),
     coach: (text(row.coach) || text(row.coach_name)).trim(),
     registered,
@@ -324,6 +335,68 @@ async function loadHistory() {
     // and have already happened.
     .filter((c) => (c.bookedByMe || c.inStandby) && c.startsAt < now)
     .sort((a, b) => b.startsAt - a.startsAt);   // newest first
+}
+
+// ---------------------------------------------------------------- workout (WOD)
+
+// The workout content for a class, by its workout_id. Discovered by capturing the
+// official HYPR mobile app: the web portal never calls this, but the endpoint is
+// the same public API (access-control-allow-origin: *) and takes the token we
+// already hold. The row's workout_id -> the sections shown in the app's "See WOD".
+//
+// Response shape is data[0][0] = an ARRAY of sections, each {box_sections:{name},
+// comment, box_categories:{name}, rounds, ...}. The triple nesting is Arbox's, not
+// a typo; we dig to the innermost array and hand back the sections.
+async function loadWod(workoutId) {
+  const data = await call(`/logbook/workout/${workoutId}`);
+  let node = data?.data;
+  // Peel the [[[ ... ]]] wrapping until we reach the array of section objects
+  // (objects with a `comment`/`box_sections`), tolerant of shape drift.
+  for (let i = 0; i < 3 && Array.isArray(node) && node.length && Array.isArray(node[0]); i++) {
+    node = node[0];
+  }
+  const sections = Array.isArray(node) ? node : [];
+  return sections
+    .filter((s) => s && (s.comment || s.box_sections))
+    .map((s) => ({
+      section: text(s.box_sections) || "Workout",
+      body: String(s.comment || "").trim(),
+    }))
+    .filter((s) => s.body);
+}
+
+// ---------------------------------------------------------------- friends
+
+// The set of the user's accepted friends' user-ids, so a card can say how many are
+// going and the roster can flag them. Loaded ONCE from /user/profile (the app's own
+// source) -- friend_users_id and booked_users[].id are the same global id space, so
+// the whole "friends in this class" feature is a client-side Set intersection with
+// no per-class request. status === 1 means accepted (a pending invite is not "going
+// together" yet). Best-effort: a failure here leaves the set empty, so cards simply
+// omit the friends line rather than breaking.
+let friendIds = new Set();
+
+async function loadFriends() {
+  try {
+    const data = await call("/user/profile");
+    const conns = data?.data?.friend_connection || [];
+    const next = new Set();
+    for (const c of conns) {
+      if (Number(c.status) !== 1) continue;   // accepted only
+      const id = c.friend_users_id ?? c.friend_user?.id;
+      if (id != null) next.add(Number(id));
+    }
+    friendIds = next;
+  } catch {
+    friendIds = new Set();
+  }
+}
+
+// How many of this class's booked members are friends (for the "N friends going"
+// line). Matches on the global user id, which booked_users[].id carries.
+function friendsIn(cls) {
+  if (!friendIds.size) return [];
+  return (cls.bookedUsers || []).filter((u) => friendIds.has(Number(u.id)));
 }
 
 // ---------------------------------------------------------------- booking
@@ -670,6 +743,11 @@ function card(cls) {
   // while the seat is not yours: once you hold it, the skip governs nothing you can
   // see -- it only stops the automation re-claiming the slot if you cancel.
   if (rule) detail += held ? " · weekly" : (skipped ? " · weekly, skipping" : " · weekly");
+  // How many friends are already in this class. Client-side match against the
+  // friend set, no request; omitted when none (or when the friend list failed to
+  // load) so a card never shows a misleading "0 friends".
+  const friends = friendsIn(cls);
+  if (friends.length) detail += ` · ⭐ ${friends.length} friend${friends.length > 1 ? "s" : ""} going`;
   sub.textContent = detail;
   meta.append(name, sub);
 
@@ -767,8 +845,139 @@ function card(cls) {
     actions.append(wk);
   }
 
-  el.append(time, meta, actions);
+  // A collapsible drawer under the card for the workout and the roster. Hidden
+  // until a chip is tapped; each chip toggles its own content and lazy-loads it
+  // once. Kept off the actions row so it never crowds Book/Skip on a phone.
+  const drawer = document.createElement("div");
+  drawer.className = "drawer hidden";
+
+  // "WOD" chip -- only when this class actually has a workout id. Fetches the
+  // sections on first open (they are cached on the element after that).
+  if (cls.workoutId) {
+    const wodBtn = document.createElement("button");
+    wodBtn.className = "btn ghost small";
+    wodBtn.textContent = "WOD";
+    wodBtn.title = "Show the workout for this class.";
+    wodBtn.onclick = () => toggleDrawer(drawer, wodBtn, "wod", () => renderWodInto(drawer, cls, wodBtn));
+    actions.append(wodBtn);
+  }
+
+  // "Who's in" chip -- only when we have a roster. No fetch: booked_users came
+  // with the schedule.
+  if (cls.bookedUsers && cls.bookedUsers.length) {
+    const rosterBtn = document.createElement("button");
+    rosterBtn.className = "btn ghost small";
+    rosterBtn.textContent = "Who's in";
+    rosterBtn.title = "Show who is booked into this class.";
+    rosterBtn.onclick = () => toggleDrawer(drawer, rosterBtn, "roster", () => renderRosterInto(drawer, cls));
+    actions.append(rosterBtn);
+  }
+
+  el.append(time, meta, actions, drawer);
   return el;
+}
+
+// Open/close the card's drawer for a given content kind. Tapping the same chip
+// again closes it; tapping the other chip swaps the content. `fill` (re)builds the
+// body only when switching to a different kind, so re-opening is instant.
+function toggleDrawer(drawer, btn, kind, fill) {
+  const open = !drawer.classList.contains("hidden") && drawer.dataset.kind === kind;
+  // Reset every chip in this card's actions row to its resting look.
+  const actions = btn.parentElement;
+  if (actions) actions.querySelectorAll(".on").forEach((b) => b.classList.remove("on"));
+  if (open) {
+    drawer.classList.add("hidden");
+    return;
+  }
+  if (drawer.dataset.kind !== kind) {
+    drawer.textContent = "";
+    drawer.dataset.kind = kind;
+    fill();
+  }
+  drawer.classList.remove("hidden");
+  btn.classList.add("on");
+}
+
+// Fill the drawer with the workout sections, fetched once. Shows a loading line
+// then the sections (each a titled block, whitespace preserved from Arbox).
+async function renderWodInto(drawer, cls, btn) {
+  drawer.textContent = "";
+  const loading = document.createElement("div");
+  loading.className = "sub";
+  loading.textContent = "Loading workout…";
+  drawer.append(loading);
+  try {
+    const sections = await loadWod(cls.workoutId);
+    drawer.textContent = "";
+    if (!sections.length) {
+      const p = document.createElement("div");
+      p.className = "sub";
+      p.textContent = "No workout posted for this class yet.";
+      drawer.append(p);
+      return;
+    }
+    for (const s of sections) {
+      const block = document.createElement("div");
+      block.className = "wod-section";
+      const h = document.createElement("div");
+      h.className = "wod-head";
+      h.textContent = s.section;
+      const body = document.createElement("div");
+      body.className = "wod-body";
+      body.textContent = s.body;   // textContent + CSS white-space:pre-wrap keeps line breaks safely
+      block.append(h, body);
+      drawer.append(block);
+    }
+  } catch (err) {
+    drawer.textContent = "";
+    const p = document.createElement("div");
+    p.className = "sub";
+    p.textContent = err.message || "Couldn't load the workout.";
+    drawer.append(p);
+  }
+}
+
+// Fill the drawer with the class roster from booked_users (no request). Friends
+// are listed first and starred; a member with no photo shows their initials.
+function renderRosterInto(drawer, cls) {
+  drawer.textContent = "";
+  const users = (cls.bookedUsers || []).slice();
+  // Friends first, then the rest; each group keeps the server's order.
+  users.sort((a, b) => (friendIds.has(Number(b.id)) ? 1 : 0) - (friendIds.has(Number(a.id)) ? 1 : 0));
+
+  const head = document.createElement("div");
+  head.className = "wod-head";
+  head.textContent = `Booked (${users.length})`;
+  drawer.append(head);
+
+  for (const u of users) {
+    const row = document.createElement("div");
+    row.className = "roster-row";
+
+    const av = document.createElement("span");
+    av.className = "avatar";
+    const full = (u.full_name || `${u.first_name || ""} ${u.last_name || ""}`).trim();
+    if (u.image) {
+      const img = document.createElement("img");
+      img.src = u.image;
+      img.alt = "";
+      img.loading = "lazy";
+      av.append(img);
+    } else {
+      // Initials fallback -- many members have no photo (image is "").
+      const parts = full.split(/\s+/).filter(Boolean);
+      av.textContent = (parts[0]?.[0] || "?") + (parts[1]?.[0] || "");
+    }
+
+    const nm = document.createElement("span");
+    nm.className = "roster-name";
+    const isFriend = friendIds.has(Number(u.id));
+    nm.textContent = (isFriend ? "⭐ " : "") + (full || "Member");
+    if (isFriend) nm.classList.add("friend");
+
+    row.append(av, nm);
+    drawer.append(row);
+  }
 }
 
 // Which day the list is showing. null until the first render picks one.
@@ -844,6 +1053,7 @@ function renderDayStrip(days, today) {
 function showQueue() {
   $("#main").classList.add("hidden");
   $("#history-view").classList.add("hidden");
+  $("#feedback-view").classList.add("hidden");
   $("#queue-view").classList.remove("hidden");
   renderQueue();
   refreshNotifyUI();
@@ -888,12 +1098,27 @@ function hideQueue() {
 async function showHistory() {
   $("#main").classList.add("hidden");
   $("#queue-view").classList.add("hidden");
+  $("#feedback-view").classList.add("hidden");
   $("#history-view").classList.remove("hidden");
   await renderHistory();
 }
 
 function hideHistory() {
   $("#history-view").classList.add("hidden");
+  $("#main").classList.remove("hidden");
+}
+
+// ---------------------------------------------------------------- feedback view
+
+function showFeedback() {
+  $("#main").classList.add("hidden");
+  $("#queue-view").classList.add("hidden");
+  $("#history-view").classList.add("hidden");
+  $("#feedback-view").classList.remove("hidden");
+}
+
+function hideFeedback() {
+  $("#feedback-view").classList.add("hidden");
   $("#main").classList.remove("hidden");
 }
 
@@ -994,6 +1219,7 @@ function showHelp() {
   $("#main").classList.add("hidden");
   $("#queue-view").classList.add("hidden");
   $("#history-view").classList.add("hidden");
+  $("#feedback-view").classList.add("hidden");
   $("#help-view").classList.remove("hidden");
 }
 
@@ -1193,6 +1419,9 @@ async function start() {
     // Queued state before membership: it changes what every card shows, and a
     // membership problem should not leave the buttons wrong.
     await refreshQueued();
+    // Friends drive the "N friends going" line and the roster stars. Best-effort
+    // and non-blocking to the render: if it fails the cards just omit friends.
+    await loadFriends();
     render();
     await resolveMembership();
   } catch (err) {
@@ -1253,6 +1482,30 @@ $("#history-btn").onclick = () =>
   $("#history-view").classList.contains("hidden")
     ? showHistory().catch((e) => toast(e.message, "bad")) : hideHistory();
 $("#history-back").onclick = hideHistory;
+
+$("#feedback-btn").onclick = () =>
+  $("#feedback-view").classList.contains("hidden") ? showFeedback() : hideFeedback();
+$("#feedback-back").onclick = hideFeedback;
+
+$("#feedback-send").onclick = async () => {
+  const message = $("#feedback-text").value.trim();
+  const kind = $("#feedback-kind").value;
+  if (!message) { toast("Write something first.", "bad"); return; }
+  const btn = $("#feedback-send");
+  btn.disabled = true;
+  btn.textContent = "Sending…";
+  try {
+    await submitFeedback(kind, message);
+    $("#feedback-text").value = "";
+    toast("Thanks — your feedback was sent.", "ok");
+    hideFeedback();
+  } catch (err) {
+    toast(err.message, "bad");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Send feedback";
+  }
+};
 
 $("#notify-toggle").onclick = async () => {
   const btn = $("#notify-toggle");

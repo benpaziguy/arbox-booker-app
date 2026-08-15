@@ -84,6 +84,15 @@ async function deleteAccountWorker() {
   setSession("");
 }
 
+// ---------------------------------------------------------------- feedback
+//
+// Post a bug report or feature request to the Worker (POST /feedback), which stores
+// it in D1 for the operator to read. Session-scoped: the Worker attributes it to the
+// signed-in user from the bearer token, so nothing about identity is sent in the body.
+async function submitFeedback(kind, message) {
+  await worker("/feedback", { method: "POST", body: { kind, message } });
+}
+
 // ---------------------------------------------------------------- web push
 //
 // "Notify me when a class is booked." The browser subscribes to its push service
