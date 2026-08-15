@@ -12,6 +12,12 @@
 
 const API = "https://apiappv2.arboxapp.com/api/v2";
 const LOCATION_ID = 48;
+// This gym exposes classes and open gym as two separate locations_box ids (see
+// GET /boxes/locations). 48 is group training; 4358 is Open Gym -- same schedule
+// endpoint, different location, and normal seat booking. We query both and merge so
+// open gym shows alongside classes. (Hardcoded like LOCATION_ID; if a third space
+// ever appears, enumerate /boxes/locations instead.)
+const OPEN_GYM_LOCATION_ID = 4358;
 const BOX_FK = "59";
 
 // Non-secret config the portal sends on every call. `identifier` is capitalised
@@ -181,10 +187,10 @@ function showSignedIn(yes) {
   $("#main").classList.toggle("hidden", !yes);
   $("#tools").classList.toggle("hidden", !yes);
   $("#refresh").classList.toggle("hidden", !yes);
-  $("#signout").classList.toggle("hidden", !yes);
-  $("#queued-btn").classList.toggle("hidden", !yes);
-  $("#history-btn").classList.toggle("hidden", !yes);
-  $("#feedback-btn").classList.toggle("hidden", !yes);
+  // The nav (History/Queue/Feedback/Sign out) now lives in the overflow menu, so
+  // only the menu button is toggled with the session; its items travel with it.
+  $("#menu-btn").classList.toggle("hidden", !yes);
+  closeMenu();
   syncHeaderHeight();
 }
 
@@ -241,6 +247,21 @@ async function resolveMembership() {
 function ymd(d) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 }
+
+// A short, tappable category label for a class, for the type picker. The gym's
+// names carry a hall/studio suffix ("W.O.D Hall A", "PUMP (סטודיו)") that would
+// splinter the picker into near-duplicates, so we collapse to the activity: the
+// part before " Hall", " (", or "  ". "Open Gym" and "HYROX" stay as-is. This is
+// display-only grouping; booking still uses the full class object.
+function classType(name) {
+  return String(name || "Class")
+    .replace(/\s*\(.*$/, "")        // drop " (סטודיו)" etc.
+    .replace(/\s+Hall\s+[A-Z].*$/i, "")  // drop " Hall A/B"
+    .trim() || "Class";
+}
+
+// Which type chip is active. null = All. Reset when it no longer matches anything.
+let selectedType = null;
 
 // Registration opens 72h before Sunday and Monday classes, 48h otherwise -- but
 // the API reports the real figure per class, so trust that and only fall back.
@@ -310,16 +331,29 @@ function parseRow(row) {
   };
 }
 
-async function loadSchedule() {
+// Fetch one location's schedule for the fortnight. Split out so classes and open
+// gym (two locations_box ids) share one code path.
+async function loadLocation(locationId) {
   const from = new Date();
   const to = new Date(from.getTime() + 14 * 86400 * 1000);
   const data = await call("/schedule/betweenDates", {
     method: "POST",
-    body: { from: ymd(from), to: ymd(to), locations_box_id: LOCATION_ID },
+    body: { from: ymd(from), to: ymd(to), locations_box_id: locationId },
     // Drop `identifier` so the response includes booked_users (the roster) -- see call().
     dropHeaders: ["identifier"],
   });
-  classes = (data?.data || []).map(parseRow).filter((c) => !c.isPast);
+  return (data?.data || []).map(parseRow).filter((c) => !c.isPast);
+}
+
+async function loadSchedule() {
+  // Classes and open gym live at different locations; fetch both together and merge.
+  // Open gym is best-effort: if that one call fails, classes still render (the gym
+  // may not always have the second location, and it must not break the main view).
+  const [cls, gym] = await Promise.all([
+    loadLocation(LOCATION_ID),
+    loadLocation(OPEN_GYM_LOCATION_ID).catch(() => []),
+  ]);
+  classes = [...cls, ...gym];
   classes.sort((a, b) => a.startsAt - b.startsAt);
   render();
 }
@@ -734,29 +768,29 @@ function card(cls) {
   const sub = document.createElement("div");
   sub.className = "sub";
 
+  // The sub-line is kept SHORT: capacity, coach, and (only when relevant) the
+  // window/weekly/friends markers as compact tokens rather than sentences. The
+  // detailed wording that used to live here ("opens Tue 14:00", "weekly, skipping")
+  // was the main source of card clutter; the essentials read at a glance now.
   let detail = `${cls.registered}/${cls.limit}`;
   if (cls.isFull && cls.standby) detail += ` · ${cls.standby} waiting`;
   else if (!cls.isFull) detail += ` · ${cls.spotsLeft} free`;
   if (cls.coach) detail += ` · ${cls.coach}`;
   const open = cls.opensAt <= new Date();
   if (!open) {
+    // Compact: "opens Tue 14:00" is useful but terse.
     detail += ` · opens ${DAYS[(cls.opensAt.getDay() + 6) % 7].slice(0, 3)} ` +
       `${cls.opensAt.getHours()}:${String(cls.opensAt.getMinutes()).padStart(2, "0")}`;
   }
-  // Say when a weekly rule owns this slot, and when it is standing down. Without
-  // this the page cannot explain why a class you never tapped is booked, or why
-  // one you cancelled came back.
   const { rule, skipped } = ruleFor(cls);
   const held = cls.bookedByMe || cls.inStandby;
-  // Say when a weekly rule owns this slot. The skip state is only worth mentioning
-  // while the seat is not yours: once you hold it, the skip governs nothing you can
-  // see -- it only stops the automation re-claiming the slot if you cancel.
-  if (rule) detail += held ? " · weekly" : (skipped ? " · weekly, skipping" : " · weekly");
-  // How many friends are already in this class. Client-side match against the
-  // friend set, no request; omitted when none (or when the friend list failed to
-  // load) so a card never shows a misleading "0 friends".
+  // A weekly rule owns this slot: a small 🔁 (with "skipping" only when it applies
+  // and the seat is not yours) instead of the old " · weekly, skipping" sentence.
+  if (rule) detail += held ? " · 🔁" : (skipped ? " · 🔁 skipping" : " · 🔁");
+  // Friends already in this class -- compact "⭐ 2" token (client-side match, no
+  // request); omitted when none so a card never shows a misleading "0".
   const friends = friendsIn(cls);
-  if (friends.length) detail += ` · ⭐ ${friends.length} friend${friends.length > 1 ? "s" : ""} going`;
+  if (friends.length) detail += ` · ⭐ ${friends.length}`;
   sub.textContent = detail;
   meta.append(name, sub);
 
@@ -818,10 +852,21 @@ function card(cls) {
   }
   if (primary) actions.append(btn);
 
-  // The rule control, shown alongside. Pointless once the seat is yours -- the
-  // automation checks for that and stands down on its own -- and cancel() sets the
-  // skip anyway, so offering it there would just be a second way to say the same
-  // thing.
+  // Everything below the primary action is SECONDARY -- weekly automation, the
+  // workout, the roster. On a phone, stacking all of it next to Book overwhelmed
+  // the card, so it lives in a collapsible row revealed by a "⋯ More" toggle. Only
+  // the one thing you most likely want (Book / Cancel / Queue) is visible at rest.
+  const secondary = document.createElement("div");
+  secondary.className = "secondary hidden";
+  let secondaryCount = 0;   // counted rather than read off .children (test DOMs vary)
+
+  // A collapsible drawer under the card for the workout and the roster. Hidden
+  // until a chip in `secondary` is tapped; each chip lazy-loads its content once.
+  const drawer = document.createElement("div");
+  drawer.className = "drawer hidden";
+
+  // The rule control. Pointless once the seat is yours -- the automation stands
+  // down on its own and cancel() sets the skip anyway.
   if (rule && !held) {
     const chip = document.createElement("button");
     chip.className = skipped ? "btn ghost small" : "btn warnish small";
@@ -830,12 +875,11 @@ function card(cls) {
       ? `${rule.id} is standing down on this date. Tap to let it book again.`
       : `${rule.id} will book this automatically. Tap to skip just this date.`;
     chip.onclick = () => act(cls, skipped ? "unskip" : "skip", chip);
-    actions.append(chip);
+    secondary.append(chip); secondaryCount++;
   }
 
-  // The weekly control. Separate from Skip (which is one date): this adds or
-  // removes the recurring RULE for this weekday+time+class. Shown whenever queueing
-  // is configured (i.e. signed in) and the seat is not already yours to cancel.
+  // The weekly control: add/remove the recurring RULE for this weekday+time+class.
+  // Shown whenever queueing is configured (signed in) and the seat is not yet yours.
   if (queueConfigured() && !held) {
     const wk = document.createElement("button");
     if (rule) {
@@ -851,24 +895,17 @@ function card(cls) {
       wk.title = `Book ${cls.name} every ${dow} at ${cls.start} automatically.`;
       wk.onclick = () => act(cls, "recur", wk);
     }
-    actions.append(wk);
+    secondary.append(wk); secondaryCount++;
   }
 
-  // A collapsible drawer under the card for the workout and the roster. Hidden
-  // until a chip is tapped; each chip toggles its own content and lazy-loads it
-  // once. Kept off the actions row so it never crowds Book/Skip on a phone.
-  const drawer = document.createElement("div");
-  drawer.className = "drawer hidden";
-
-  // "WOD" chip -- only when this class actually has a workout id. Fetches the
-  // sections on first open (they are cached on the element after that).
+  // "WOD" chip -- only when this class has a workout id (open gym has none).
   if (cls.workoutId) {
     const wodBtn = document.createElement("button");
     wodBtn.className = "btn ghost small";
     wodBtn.textContent = "WOD";
     wodBtn.title = "Show the workout for this class.";
     wodBtn.onclick = () => toggleDrawer(drawer, wodBtn, "wod", () => renderWodInto(drawer, cls, wodBtn));
-    actions.append(wodBtn);
+    secondary.append(wodBtn); secondaryCount++;
   }
 
   // "Who's in" chip -- only when we have a roster. No fetch: booked_users came
@@ -879,10 +916,30 @@ function card(cls) {
     rosterBtn.textContent = "Who's in";
     rosterBtn.title = "Show who is booked into this class.";
     rosterBtn.onclick = () => toggleDrawer(drawer, rosterBtn, "roster", () => renderRosterInto(drawer, cls));
-    actions.append(rosterBtn);
+    secondary.append(rosterBtn); secondaryCount++;
   }
 
-  el.append(time, meta, actions, drawer);
+  // The "⋯ More" toggle: only when there is at least one secondary action to hide.
+  // It reveals `secondary` in place, and closes any open drawer when collapsing so
+  // the card returns fully to rest.
+  if (secondaryCount) {
+    const more = document.createElement("button");
+    more.className = "btn ghost small more-toggle";
+    more.textContent = "⋯";
+    more.title = "More options";
+    more.onclick = () => {
+      const opening = secondary.classList.contains("hidden");
+      secondary.classList.toggle("hidden");
+      more.classList.toggle("on", opening);
+      if (!opening) {
+        drawer.classList.add("hidden");   // collapsing More also closes the drawer
+        secondary.querySelectorAll(".on").forEach((b) => b.classList.remove("on"));
+      }
+    };
+    actions.append(more);
+  }
+
+  el.append(time, meta, actions, secondary, drawer);
   return el;
 }
 
@@ -998,17 +1055,27 @@ function render() {
   const filter = $("#filter").value.trim().toLowerCase();
   const mineOnly = $("#mine-only").checked;
 
-  // Filter first (by search + mine), THEN group by day -- so the day strip only
-  // offers days that actually have something to show under the current filter.
+  // The type picker's options come from the data, so it never lists a type the gym
+  // isn't running this fortnight. Built before filtering by type (but the picker
+  // itself is always shown in full, so you can switch away from an empty type).
+  const types = [...new Set(classes.map((c) => classType(c.name)))].sort();
+  if (selectedType && !types.includes(selectedType)) selectedType = null;  // stale pick
+  // Render the picker whenever there is more than one type to choose between.
+  if (types.length > 1) host.append(renderTypePicker(types));
+
+  // Filter (mine + text + type), THEN group by day -- so the day strip only offers
+  // days that actually have something to show under the current filters.
   const shown = classes.filter((c) => {
     if (mineOnly && !c.bookedByMe && !c.inStandby) return false;
+    if (selectedType && classType(c.name) !== selectedType) return false;
     return !filter || c.name.toLowerCase().includes(filter);
   });
 
   if (!shown.length) {
     const p = document.createElement("p");
     p.className = "empty";
-    p.textContent = mineOnly ? "You are not booked on anything." : "Nothing matches.";
+    p.textContent = mineOnly ? "You are not booked on anything."
+      : selectedType ? `No ${selectedType} classes match.` : "Nothing matches.";
     host.append(p);
     return;
   }
@@ -1033,6 +1100,25 @@ function render() {
     return;
   }
   for (const cls of dayClasses) host.append(card(cls));
+}
+
+// The class-type picker: a horizontal row of chips (All, W.O.D, HYROX, Open Gym,
+// …) built from the types actually on the schedule. Tapping one filters the list
+// to that activity; "All" clears it. Sits above the day strip.
+function renderTypePicker(types) {
+  const row = document.createElement("div");
+  row.className = "type-picker";
+  const chip = (label, value) => {
+    const b = document.createElement("button");
+    const on = (value === null && !selectedType) || value === selectedType;
+    b.className = "type-chip" + (on ? " on" : "");
+    b.textContent = label;
+    b.onclick = () => { selectedType = value; render(); };
+    return b;
+  };
+  row.append(chip("All", null));
+  for (const t of types) row.append(chip(t, t));
+  return row;
 }
 
 // A horizontal strip of tappable day pills -- the "week / date picker". Shows every
@@ -1129,6 +1215,23 @@ function showFeedback() {
 function hideFeedback() {
   $("#feedback-view").classList.add("hidden");
   $("#main").classList.remove("hidden");
+}
+
+// ---------------------------------------------------------------- overflow menu
+
+function closeMenu() {
+  const m = $("#menu");
+  if (m) m.classList.add("hidden");
+  const b = $("#menu-btn");
+  if (b && b.setAttribute) b.setAttribute("aria-expanded", "false");
+}
+
+function toggleMenu() {
+  const m = $("#menu");
+  const opening = m.classList.contains("hidden");
+  m.classList.toggle("hidden");
+  const b = $("#menu-btn");
+  if (b && b.setAttribute) b.setAttribute("aria-expanded", String(opening));
 }
 
 async function renderHistory() {
@@ -1481,6 +1584,22 @@ $("#signout").onclick = signOut;
 $("#help-btn").onclick = () =>
   $("#help-view").classList.contains("hidden") ? showHelp() : hideHelp();
 $("#help-back").onclick = hideHelp;
+
+// The overflow menu holds the nav. Its button toggles it; picking any item closes
+// it (the item's own handler still runs, since these fire on the same click after).
+$("#menu-btn").onclick = toggleMenu;
+$("#menu").addEventListener("click", closeMenu);
+// A tap anywhere outside the open menu dismisses it. Guarded for the test DOM,
+// which has no real document/closest.
+if (typeof document !== "undefined" && document.addEventListener) {
+  document.addEventListener("click", (e) => {
+    const m = $("#menu");
+    if (!m || m.classList.contains("hidden")) return;
+    const t = e.target;
+    if (t && t.closest && (t.closest("#menu") || t.closest("#menu-btn"))) return;
+    closeMenu();
+  });
+}
 
 $("#queued-btn").onclick = () => {
   if ($("#queue-view").classList.contains("hidden")) showQueue(); else hideQueue();
