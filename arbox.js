@@ -100,9 +100,16 @@ function messageText(value, depth = 0) {
   return "";
 }
 
-async function call(path, { method = "GET", body = null, auth = true } = {}) {
+async function call(path, { method = "GET", body = null, auth = true, dropHeaders = [] } = {}) {
   const headers = { ...BASE_HEADERS };
   if (auth) headers.accesstoken = token;
+  // Some responses are shaped by headers, not just the body. The `identifier`
+  // header marks the request as the public kiosk/site view, and Arbox then STRIPS
+  // `booked_users` (the class roster) from /schedule responses -- so the "Who's in"
+  // list and the friends-going count come back empty. Callers that need the roster
+  // drop `identifier`; everything else (booking, cancel) keeps the full BASE_HEADERS
+  // unchanged, since identifier is accepted there and only affects roster inclusion.
+  for (const h of dropHeaders) delete headers[h];
   const res = await fetch(API + path, {
     method,
     headers,
@@ -309,6 +316,8 @@ async function loadSchedule() {
   const data = await call("/schedule/betweenDates", {
     method: "POST",
     body: { from: ymd(from), to: ymd(to), locations_box_id: LOCATION_ID },
+    // Drop `identifier` so the response includes booked_users (the roster) -- see call().
+    dropHeaders: ["identifier"],
   });
   classes = (data?.data || []).map(parseRow).filter((c) => !c.isPast);
   classes.sort((a, b) => a.startsAt - b.startsAt);

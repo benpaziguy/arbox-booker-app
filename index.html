@@ -62,6 +62,20 @@
   .btn {
     border:0; border-radius:9px; padding:9px 13px; font-size:13.5px; font-weight:650;
     cursor:pointer; background:var(--accent); color:#08111f; white-space:nowrap;
+    transition:transform .08s ease, filter .12s ease, background-color .12s ease,
+      border-color .12s ease, box-shadow .12s ease, opacity .12s ease;
+    touch-action:manipulation;
+  }
+  /* Press feedback on tap (touch) and click (mouse): a brief inset shrink so every
+     button visibly acknowledges the press. Kept tiny so it never feels laggy. */
+  .btn:active:not([disabled]) { transform:scale(.96); filter:brightness(.92); }
+  /* Hover polish only where a real pointer exists -- `any-hover:hover` excludes
+     touchscreens, which would otherwise keep a "stuck" hover after a tap. */
+  @media (any-hover:hover) {
+    .btn:not([disabled]):hover { filter:brightness(1.08); }
+    .btn.ghost:not([disabled]):hover { border-color:var(--accent); color:var(--text); }
+    .btn.danger:not([disabled]):hover { background:rgba(255,93,93,.12); }
+    .day-pill:hover { border-color:var(--accent); color:var(--text); }
   }
   .btn[disabled] { opacity:.4; cursor:default; }
   .btn.ghost { background:transparent; border:1px solid var(--line); color:var(--dim); }
@@ -85,6 +99,18 @@
   .toast.bad { border-left-color:var(--bad); }
   .toast.warn { border-left-color:var(--warn); }
   .hidden { display:none !important; }
+  /* View-switch transition: each top-level view fades and rises slightly as it
+     becomes visible, so moving between the schedule, Queue, History, Feedback and
+     Help feels like a switch rather than a jump. Only the container animates (not
+     every row), so long lists stay cheap. Respect reduced-motion. */
+  main > section { animation:view-in .22s ease both; }
+  .drawer:not(.hidden) { animation:view-in .16s ease both; }
+  @keyframes view-in { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:none; } }
+  @media (prefers-reduced-motion:reduce) {
+    main > section, .drawer:not(.hidden) { animation:none; }
+    .btn { transition:none; }
+    .btn:active:not([disabled]) { transform:none; }
+  }
   .empty { color:var(--dim); font-size:14px; padding:24px 2px; }
   .note { font-size:12.5px; color:var(--dim); line-height:1.5; margin-top:14px; }
   #gate { max-width:420px; margin:0 auto; padding:8px 0; }
